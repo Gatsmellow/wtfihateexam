@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex">
+  <title>DeepSeek 跨域侦察 · wtfihateexam</title>
+  <style>
+    :root {
+      --paper: #f7f3ea;
+      --card: #fffdf8;
+      --ink: #1d2925;
+      --muted: #68736d;
+      --line: #ddd4c5;
+      --green: #245b4a;
+      --red: #a63d2f;
+      --amber: #9a6a1f;
+      --mono: "Cascadia Code", Consolas, "SFMono-Regular", monospace;
+      --sans: "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% 4%, rgba(36, 91, 74, .08), transparent 26rem),
+        radial-gradient(circle at 92% 94%, rgba(166, 61, 47, .07), transparent 28rem),
+        var(--paper);
+      font-family: var(--sans);
+      line-height: 1.65;
+    }
+    .wrap { width: min(860px, calc(100% - 32px)); margin: 0 auto; padding: 40px 0 64px; }
+    .eyebrow { color: var(--red); font-size: 12px; letter-spacing: .18em; font-weight: 700; }
+    h1 { margin: 4px 0 8px; font-family: Georgia, "Songti SC", serif; font-size: clamp(26px, 5vw, 40px); line-height: 1.2; }
+    .sub { margin: 0 0 24px; color: var(--muted); font-size: 14px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: 0 14px 40px rgba(29, 41, 37, .06);
+      padding: 22px;
+      margin-bottom: 18px;
+    }
+    label { display: block; font-size: 13px; font-weight: 700; margin: 0 0 6px; }
+    .hint { color: var(--muted); font-size: 12px; font-weight: 400; }
+    input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 11px 12px;
+      color: var(--ink);
+      background: #fff;
+      font: inherit;
+      font-size: 14px;
+      outline: none;
+    }
+    input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(36, 91, 74, .12); }
+    .field { margin-bottom: 15px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    button {
+      appearance: none;
+      border: 0;
+      border-radius: 9px;
+      padding: 11px 18px;
+      color: #fff;
+      background: var(--green);
+      font: inherit;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button:hover { background: #1a493b; }
+    button:disabled { opacity: .55; cursor: wait; }
+    button.ghost { color: var(--green); background: transparent; border: 1px solid var(--line); }
+    .status { display: none; margin-top: 18px; }
+    .status.show { display: block; }
+    .status-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+    .metric { padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+    .metric b { display: block; font-family: var(--mono); font-size: 17px; }
+    .metric span { color: var(--muted); font-size: 11px; }
+    .ok { color: var(--green); }
+    .bad { color: var(--red); }
+    .warn { color: var(--amber); }
+    .verdict { border-left: 3px solid currentColor; padding: 10px 13px; background: #fbf8f1; font-size: 13px; }
+    h2 { margin: 20px 0 8px; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
+    pre {
+      margin: 0;
+      padding: 13px;
+      overflow: auto;
+      max-height: 330px;
+      border-radius: 9px;
+      color: #e8f0e9;
+      background: #1d2925;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .models { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 7px; }
+    .models li { padding: 5px 10px; border-radius: 99px; background: #e9efe9; color: var(--green); font-family: var(--mono); font-size: 12px; }
+    .privacy { margin-top: 18px; padding: 12px 14px; border-radius: 10px; background: rgba(36, 91, 74, .06); color: var(--muted); font-size: 12px; }
+    .privacy strong { color: var(--ink); }
+    .step-list { margin: 8px 0 0; padding-left: 20px; color: var(--muted); font-size: 13px; }
+    .step-list li { margin: 3px 0; }
+    @media (max-width: 620px) {
+      .status-grid { grid-template-columns: 1fr; }
+      .wrap { padding-top: 24px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <div class="eyebrow">阶段零 · 跨域侦察</div>
+    <h1>DeepSeek 能不能直接在浏览器里调用？</h1>
+    <p class="sub">这个页面只做一件事：用你的 key 发一个带 Authorization 头的 GET 请求，看看浏览器是否被 CORS 拦截。它不会保存 key，也不会写入任何数据。</p>
+
+    <section class="card">
+      <div class="field">
+        <label for="baseUrl">API base_url</label>
+        <input id="baseUrl" type="url" value="https://api.deepseek.com/v1" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="apiKey">DeepSeek API key <span class="hint">必填，仅用于本次测试，刷新即消失</span></label>
+        <input id="apiKey" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false">
+      </div>
+      <div class="row">
+        <button id="runBtn" type="button">发起跨域请求</button>
+        <button id="clearBtn" class="ghost" type="button">清空结果</button>
+      </div>
+
+      <div id="status" class="status" aria-live="polite">
+        <div id="verdict" class="verdict"></div>
+        <div class="status-grid" style="margin-top: 14px;">
+          <div class="metric"><b id="statusCode">—</b><span>HTTP 状态码</span></div>
+          <div class="metric"><b id="elapsed">—</b><span>耗时</span></div>
+          <div class="metric"><b id="modelCount">—</b><span>模型数量</span></div>
+        </div>
+
+        <h2>响应头（节选）</h2>
+        <pre id="headers">—</pre>
+
+        <h2>模型列表</h2>
+        <ul id="models" class="models"></ul>
+
+        <h2>原始响应</h2>
+        <pre id="body">—</pre>
+      </div>
+    </section>
+
+    <section class="card">
+      <strong style="font-size: 14px;">怎么做</strong>
+      <ol class="step-list">
+        <li>在 Chrome / Edge 里直接双击打开这个文件，或用本地服务器打开。</li>
+        <li>填入你自己的 DeepSeek key，点“发起跨域请求”。</li>
+        <li>看到 <b>200</b> 且下方列出模型，才算通过。若浏览器报 <code>TypeError: Failed to fetch</code> 或 CORS 错误，就是被拦截，需要停下来换方案。</li>
+      </ol>
+      <div class="privacy"><strong>隐私：</strong>key 只在当前页面的内存中使用；请求直接发往你填写的 API 地址，不经过本站的任何服务器。页面没有埋点、没有日志上报。</div>
+    </section>
+  </main>
+
+  <script>
+    // 页面级状态：key 只保存在内存变量里，绝不写入 localStorage / IndexedDB。
+    var running = false;
+
+    var els = {
+      baseUrl: document.getElementById('baseUrl'),
+      apiKey: document.getElementById('apiKey'),
+      runBtn: document.getElementById('runBtn'),
+      clearBtn: document.getElementById('clearBtn'),
+      status: document.getElementById('status'),
+      verdict: document.getElementById('verdict'),
+      statusCode: document.getElementById('statusCode'),
+      elapsed: document.getElementById('elapsed'),
+      modelCount: document.getElementById('modelCount'),
+      headers: document.getElementById('headers'),
+      models: document.getElementById('models'),
+      body: document.getElementById('body')
+    };
+
+    // 去掉末尾斜杠，避免拼出双斜杠。
+    function normalizeBase(value) {
+      return String(value || '').trim().replace(/\/+$/, '');
+    }
+
+    // 只展示与跨域、内容类型相关的响应头，避免把无关日志刷满屏。
+    function pickHeaders(response) {
+      var wanted = [
+        'access-control-allow-origin',
+        'access-control-allow-methods',
+        'access-control-allow-headers',
+        'access-control-allow-credentials',
+        'content-type',
+        'x-ds-trace-id',
+        'server',
+        'date'
+      ];
+      var lines = [];
+      wanted.forEach(function (name) {
+        var value = response.headers.get(name);
+        if (value) lines.push(name + ': ' + value);
+      });
+      return lines.length ? lines.join('\n') : '（浏览器没有暴露任何响应头；这通常意味着请求没有真正到达服务器，或被 CORS 拦截）';
+    }
+
+    function showVerdict(kind, text) {
+      els.verdict.className = 'verdict ' + kind;
+      els.verdict.textContent = text;
+    }
+
+    function resetOutput() {
+      els.status.classList.remove('show');
+      els.statusCode.textContent = '—';
+      els.elapsed.textContent = '—';
+      els.modelCount.textContent = '—';
+      els.headers.textContent = '—';
+      els.body.textContent = '—';
+      els.models.textContent = '';
+      els.verdict.textContent = '';
+      els.verdict.className = 'verdict';
+    }
+
+    // 发起 GET /models：这是最小化、无副作用的鉴权 + CORS 验证请求。
+    async function runTest() {
+      if (running) return;
+      var base = normalizeBase(els.baseUrl.value);
+      var key = els.apiKey.value.trim();
+
+      if (!base) {
+        showVerdict('bad', '请先填写 API base_url。');
+        els.status.classList.add('show');
+        return;
+      }
+      if (!key) {
+        showVerdict('bad', '请先填写 API key。没有 key 只能验证请求是否被 CORS 拦截，无法拿到 200 和模型列表。');
+        els.status.classList.add('show');
+        return;
+      }
+
+      running = true;
+      resetOutput();
+      els.status.classList.add('show');
+      els.runBtn.disabled = true;
+      els.runBtn.textContent = '请求中…';
+      showVerdict('warn', '正在从浏览器直接请求 ' + base + '/models …');
+
+      var started = performance.now();
+      try {
+        var response = await fetch(base + '/models', {
+          method: 'GET',
+          headers: {
+            'Authorization': 'Bearer ' + key,
+            'Accept': 'application/json'
+          }
+        });
+        var elapsed = Math.round(performance.now() - started);
+        var text = await response.text();
+        var data = null;
+        try { data = JSON.parse(text); } catch (ignore) {}
+
+        els.statusCode.textContent = String(response.status);
+        els.statusCode.className = response.ok ? 'ok' : 'bad';
+        els.elapsed.textContent = elapsed + ' ms';
+        els.headers.textContent = pickHeaders(response);
+        els.body.textContent = text || '(空响应)';
+
+        if (response.ok) {
+          var list = Array.isArray(data && data.data) ? data.data : [];
+          els.modelCount.textContent = String(list.length);
+          els.modelCount.className = 'ok';
+          els.models.textContent = '';
+          list.forEach(function (item) {
+            var li = document.createElement('li');
+            li.textContent = item.id || '(未命名模型)';
+            els.models.appendChild(li);
+          });
+          if (!list.length) {
+            var none = document.createElement('li');
+            none.textContent = '接口返回 200，但没有解析到 data[] 模型列表';
+            els.models.appendChild(none);
+          }
+          showVerdict('ok', '通过：浏览器成功拿到 ' + response.status + ' 和 ' + list.length + ' 个模型，CORS 没有拦截这次带 Authorization 的请求。');
+        } else {
+          els.modelCount.textContent = '—';
+          // 401/403 依然能证明 CORS 通过：浏览器允许 JS 读到响应，只是 key 或权限有问题。
+          if (response.status === 401 || response.status === 403) {
+            showVerdict('warn', '跨域本身通过（浏览器读到了 ' + response.status + ' 响应和响应头），但这把 key 未通过鉴权。请检查 key 是否复制完整、是否属于这个 API 地址。');
+          } else {
+            showVerdict('bad', '请求到达了服务器并返回 ' + response.status + '，跨域没有被拦截；但接口调用失败。看下方原始响应。');
+          }
+        }
+      } catch (error) {
+        var elapsedFail = Math.round(performance.now() - started);
+        els.elapsed.textContent = elapsedFail + ' ms';
+        els.statusCode.textContent = '—';
+        els.headers.textContent = '（没有拿到响应头）';
+        els.body.textContent = String(error && (error.stack || error.message) || error);
+        showVerdict('bad', '失败：浏览器没有把响应交给页面。常见原因：CORS 被拦截、网络不可达、地址写错、证书错误，或浏览器插件拦截。请按 F12 看 Console 的具体报错。');
+        console.error('[test-cors]', error);
+      } finally {
+        running = false;
+        els.runBtn.disabled = false;
+        els.runBtn.textContent = '发起跨域请求';
+        // 用完即弃：不让 key 留在页面 DOM 的 value 里继续存在。
+        els.apiKey.value = '';
+      }
+    }
+
+    els.runBtn.addEventListener('click', runTest);
+    // 回车即可测试，减少无 CS 基础用户的操作步骤。
+    els.apiKey.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') runTest();
+    });
+    els.clearBtn.addEventListener('click', function () {
+      els.apiKey.value = '';
+      resetOutput();
+      els.apiKey.focus();
+    });
+  </script>
+</body>
+</html>

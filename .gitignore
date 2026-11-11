@@ -1,0 +1,13 @@
+# 编辑器 / 系统垃圾文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地环境与日志，不应进入静态站点
+.env
+.env.*
+*.log
+
+# 本地测试产物（真正的测试工具在仓库外）
+/test-results/
+/playwright-report/

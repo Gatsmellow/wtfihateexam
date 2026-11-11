@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1d2925">
+  <meta name="description" content="wtfihateexam 学习工作台：用自己的 DeepSeek key，在一个浏览器里完成批改、讲题、出题、自学与错题复盘。">
+  <meta name="robots" content="index,follow">
+  <title>wtfihateexam · 学习工作台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231d2925'/%3E%3Cpath d='M14 20h36M14 32h24M14 44h30' stroke='%23f7f3ea' stroke-width='6' stroke-linecap='round'/%3E%3Ccircle cx='48' cy='46' r='9' fill='%23a63d2f'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <button class="icon-btn menu-btn" id="menuBtn" type="button" aria-label="打开学科菜单" aria-expanded="false">
+        <span class="menu-lines" aria-hidden="true"></span>
+      </button>
+
+      <a class="brand" href="./" aria-label="wtfihateexam 首页">
+        <span class="brand-mark" aria-hidden="true">w</span>
+        <span class="brand-name">wtf<span>ihateexam</span></span>
+        <span class="brand-tag">把错题变成分数</span>
+      </a>
+
+      <div class="top-actions">
+        <button class="text-btn" id="exportBtn" type="button" title="导出整个工作区为 JSON">导出</button>
+        <button class="text-btn" id="importBtn" type="button" title="从 JSON 备份恢复">导入</button>
+        <button class="primary-btn small" id="settingsBtn" type="button">设置 Key</button>
+      </div>
+    </header>
+
+    <div class="shell">
+      <aside class="sidebar" id="sidebar" aria-label="学科与技能">
+        <div class="sidebar-head">
+          <div>
+            <span class="eyebrow">MY WORKSPACE</span>
+            <strong>我的学科</strong>
+          </div>
+          <span class="count-pill" id="subjectCount">0</span>
+        </div>
+
+        <button class="new-subject-btn" id="newSubjectBtn" type="button">
+          <span aria-hidden="true">＋</span> 新建学科
+        </button>
+
+        <nav class="subject-tree" id="subjectTree" aria-label="学科三级树"></nav>
+
+        <div class="sidebar-foot">
+          <div class="local-badge"><span class="dot"></span> 纯本地运行</div>
+          <p>没有服务器、没有账号。你的 key 与学习数据只存在当前浏览器。</p>
+        </div>
+      </aside>
+
+      <div class="scrim" id="scrim" hidden></div>
+
+      <main class="main">
+        <!-- 聊天视图 -->
+        <section class="view chat-view" id="chatView" aria-label="对话">
+          <header class="chat-header">
+            <div class="chat-heading">
+              <div class="chat-title-line">
+                <h1 id="chatTitle">开始学习</h1>
+                <button class="icon-btn tiny" id="renameConvBtn" type="button" title="重命名当前对话" aria-label="重命名当前对话">✎</button>
+              </div>
+              <div class="chat-meta">
+                <span class="subject-badge" id="subjectBadge">未选择学科</span>
+                <span class="meta-dot" aria-hidden="true">·</span>
+                <span id="skillBadge">批改</span>
+                <span class="meta-dot" aria-hidden="true">·</span>
+                <span id="modelBadge">deepseek-chat</span>
+                <span class="feynman-chip" id="feynmanChip" hidden>费曼模式</span>
+              </div>
+            </div>
+            <div class="chat-actions">
+              <button class="text-btn" id="memoryBtn" type="button">记忆库</button>
+              <button class="text-btn" id="closeBtn" type="button">结束并写回</button>
+              <button class="primary-btn small" id="newChatBtn" type="button">＋ 新对话</button>
+            </div>
+          </header>
+
+          <div class="no-key-banner" id="noKeyBanner" hidden>
+            <div>
+              <strong>还差一把钥匙</strong>
+              <span>填入你自己的 DeepSeek API key 就能开始。key 只存在这个浏览器里。</span>
+            </div>
+            <button class="primary-btn small" id="bannerSettingsBtn" type="button">去填 Key</button>
+          </div>
+
+          <div class="message-scroller" id="messageScroller">
+            <div class="messages" id="messages" aria-live="polite" aria-relevant="additions text"></div>
+          </div>
+
+          <footer class="composer-wrap">
+            <div class="composer-hint" id="composerHint">
+              <span id="composerModeHint">批改模式：贴题目或答题，AI 按步骤批改</span>
+              <span class="kbd-hint">Enter 发送 · Shift+Enter 换行</span>
+            </div>
+            <div class="composer" id="composerBox">
+              <textarea id="composer" rows="1" placeholder="把题目、你的答案或想问的问题贴在这里…" aria-label="输入消息"></textarea>
+              <div class="composer-actions">
+                <button class="stop-btn" id="stopBtn" type="button" hidden>停止</button>
+                <button class="send-btn" id="sendBtn" type="button" title="发送" aria-label="发送">
+                  <span>发送</span><span aria-hidden="true">↑</span>
+                </button>
+              </div>
+            </div>
+            <p class="composer-privacy">消息直接发给你填写的 API 地址；本站没有中转服务器。</p>
+          </footer>
+        </section>
+
+        <!-- 记忆库视图 -->
+        <section class="view memory-view" id="memoryView" aria-label="记忆库" hidden>
+          <header class="chat-header memory-header">
+            <div class="chat-heading">
+              <div class="chat-title-line">
+                <h1>记忆库</h1>
+                <span class="subject-badge" id="memorySubjectBadge">未选择学科</span>
+              </div>
+              <div class="chat-meta">
+                <span>错题、失分总账与考察清单，是对话之外真正留下来的东西。</span>
+              </div>
+            </div>
+            <div class="chat-actions">
+              <button class="text-btn" id="backToChatBtn" type="button">← 回到对话</button>
+            </div>
+          </header>
+
+          <div class="memory-tabs" role="tablist" aria-label="记忆库分类">
+            <button class="memory-tab active" data-tab="questions" role="tab" aria-selected="true" type="button">错题本 <span id="questionTabCount">0</span></button>
+            <button class="memory-tab" data-tab="ledger" role="tab" aria-selected="false" type="button">失分总账 <span id="ledgerTabCount">0</span></button>
+            <button class="memory-tab" data-tab="queue" role="tab" aria-selected="false" type="button">考察清单 <span id="queueTabCount">0</span></button>
+          </div>
+
+          <div class="memory-body" id="memoryBody"></div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <!-- 设置 -->
+  <dialog class="modal" id="settingsDialog" aria-labelledby="settingsTitle">
+    <form class="modal-card" id="settingsForm" method="dialog">
+      <header class="modal-head">
+        <div>
+          <span class="eyebrow">BRING YOUR OWN KEY</span>
+          <h2 id="settingsTitle">连接你的 DeepSeek</h2>
+        </div>
+        <button class="icon-btn" type="button" data-close-dialog="settingsDialog" aria-label="关闭">×</button>
+      </header>
+      <div class="modal-body">
+        <div class="field">
+          <label for="baseUrlInput">API base_url</label>
+          <input id="baseUrlInput" type="url" value="https://api.deepseek.com/v1" autocomplete="off" spellcheck="false">
+          <p class="field-hint">默认 <code>https://api.deepseek.com/v1</code>。使用中转服务时可改。</p>
+        </div>
+        <div class="field">
+          <label for="modelInput">模型名</label>
+          <input id="modelInput" type="text" value="deepseek-chat" autocomplete="off" spellcheck="false">
+          <p class="field-hint">默认 <code>deepseek-chat</code>；如服务商支持其他模型，填对应名称。</p>
+        </div>
+        <div class="field">
+          <label for="apiKeyInput">API key</label>
+          <div class="secret-input">
+            <input id="apiKeyInput" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false">
+            <button class="reveal-btn" id="revealKeyBtn" type="button" aria-label="显示或隐藏 key">显示</button>
+          </div>
+          <p class="field-hint key-hint"><span class="lock" aria-hidden="true">▣</span> 仅存在你的浏览器 localStorage 中，不会上传到本站、不会写进导出文件。</p>
+        </div>
+        <label class="check-row">
+          <input id="debugInput" type="checkbox">
+          <span>调试模式：每次发送时在控制台打印完整 system prompt</span>
+        </label>
+
+        <div class="connection-row">
+          <button class="ghost-btn" id="testConnectionBtn" type="button">测试连接</button>
+          <span class="connection-result" id="connectionResult" role="status"></span>
+        </div>
+      </div>
+      <footer class="modal-foot">
+        <button class="ghost-btn" type="button" data-close-dialog="settingsDialog">取消</button>
+        <button class="primary-btn" type="submit">保存设置</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- 新建 / 编辑学科 -->
+  <dialog class="modal" id="subjectDialog" aria-labelledby="subjectDialogTitle">
+    <form class="modal-card" id="subjectForm" method="dialog">
+      <header class="modal-head">
+        <div>
+          <span class="eyebrow">SUBJECT</span>
+          <h2 id="subjectDialogTitle">新建学科</h2>
+        </div>
+        <button class="icon-btn" type="button" data-close-dialog="subjectDialog" aria-label="关闭">×</button>
+      </header>
+      <div class="modal-body">
+        <div class="field">
+          <label for="subjectNameInput">学科名</label>
+          <input id="subjectNameInput" type="text" maxlength="30" placeholder="例如：示例学科A" required autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="subjectRulesInput">本学科 rules <span class="label-note">会被附加到每次 system prompt 末尾</span></label>
+          <textarea id="subjectRulesInput" rows="7" placeholder="例如：计算题按步骤给分；选择题只看最终结果；错因分四类：知识空缺 / 计算粗心 / 书写规范 / 程序缺步。"></textarea>
+          <p class="field-hint">留空也可以，之后随时点学科右侧的 ✎ 修改。内容只存本地。</p>
+        </div>
+      </div>
+      <footer class="modal-foot">
+        <button class="ghost-btn" type="button" data-close-dialog="subjectDialog">取消</button>
+        <button class="primary-btn" type="submit">保存学科</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- 重命名对话 -->
+  <dialog class="modal slim" id="renameDialog" aria-labelledby="renameDialogTitle">
+    <form class="modal-card" id="renameForm" method="dialog">
+      <header class="modal-head">
+        <h2 id="renameDialogTitle">重命名对话</h2>
+        <button class="icon-btn" type="button" data-close-dialog="renameDialog" aria-label="关闭">×</button>
+      </header>
+      <div class="modal-body">
+        <div class="field">
+          <label for="renameInput">对话名称</label>
+          <input id="renameInput" type="text" maxlength="60" required autocomplete="off">
+        </div>
+      </div>
+      <footer class="modal-foot">
+        <button class="ghost-btn" type="button" data-close-dialog="renameDialog">取消</button>
+        <button class="primary-btn" type="submit">保存</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- 手动添加 / 编辑错题 -->
+  <dialog class="modal" id="questionDialog" aria-labelledby="questionDialogTitle">
+    <form class="modal-card" id="questionForm" method="dialog">
+      <header class="modal-head">
+        <div>
+          <span class="eyebrow">WRONG QUESTION</span>
+          <h2 id="questionDialogTitle">添加错题</h2>
+        </div>
+        <button class="icon-btn" type="button" data-close-dialog="questionDialog" aria-label="关闭">×</button>
+      </header>
+      <div class="modal-body">
+        <div class="form-grid">
+          <div class="field">
+            <label for="questionNumberInput">题号</label>
+            <input id="questionNumberInput" type="text" maxlength="80" placeholder="例如：练习卷 3-2" required autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="questionStatusInput">状态</label>
+            <select id="questionStatusInput">
+              <option>待复习</option>
+              <option>复习中</option>
+              <option>已掌握</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label for="questionReasonInput">错因</label>
+          <textarea id="questionReasonInput" rows="3" maxlength="500" placeholder="知识空缺 / 计算粗心 / 书写规范 / 程序缺步，具体错在哪"></textarea>
+        </div>
+        <div class="field">
+          <label for="questionStrategyInput">对策</label>
+          <textarea id="questionStrategyInput" rows="3" maxlength="500" placeholder="下次遇到同类题，具体怎么做"></textarea>
+        </div>
+      </div>
+      <footer class="modal-foot">
+        <button class="ghost-btn" type="button" data-close-dialog="questionDialog">取消</button>
+        <button class="primary-btn" type="submit">保存错题</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- 手动添加 / 编辑总账行 -->
+  <dialog class="modal" id="ledgerDialog" aria-labelledby="ledgerDialogTitle">
+    <form class="modal-card" id="ledgerForm" method="dialog">
+      <header class="modal-head">
+        <div>
+          <span class="eyebrow">LEDGER</span>
+          <h2 id="ledgerDialogTitle">添加总账模块</h2>
+        </div>
+        <button class="icon-btn" type="button" data-close-dialog="ledgerDialog" aria-label="关闭">×</button>
+      </header>
+      <div class="modal-body">
+        <div class="field">
+          <label for="ledgerModuleInput">模块</label>
+          <input id="ledgerModuleInput" type="text" maxlength="60" placeholder="例如：模块A" required autocomplete="off">
+        </div>
+        <div class="form-grid">
+          <div class="field">
+            <label for="ledgerLostInput">失分</label>
+            <input id="ledgerLostInput" type="number" min="0" step="0.5" value="0" required>
+          </div>
+          <div class="field">
+            <label for="ledgerTotalInput">满分</label>
+            <input id="ledgerTotalInput" type="number" min="0" step="0.5" value="0" required>
+          </div>
+        </div>
+        <div class="field">
+          <label for="ledgerNoteInput">备注</label>
+          <input id="ledgerNoteInput" type="text" maxlength="200" placeholder="可选：主要丢分点">
+        </div>
+      </div>
+      <footer class="modal-foot">
+        <button class="ghost-btn" type="button" data-close-dialog="ledgerDialog">取消</button>
+        <button class="primary-btn" type="submit">保存</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- 通用确认框 -->
+  <dialog class="modal slim" id="confirmDialog" aria-labelledby="confirmTitle">
+    <div class="modal-card">
+      <header class="modal-head">
+        <h2 id="confirmTitle">确认操作</h2>
+      </header>
+      <div class="modal-body">
+        <p class="confirm-text" id="confirmText"></p>
+      </div>
+      <footer class="modal-foot">
+        <button class="ghost-btn" id="confirmCancelBtn" type="button">取消</button>
+        <button class="danger-btn" id="confirmOkBtn" type="button">确认</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <!-- 关账确认 -->
+  <dialog class="modal wide" id="reviewDialog" aria-labelledby="reviewTitle">
+    <div class="modal-card">
+      <header class="modal-head">
+        <div>
+          <span class="eyebrow">CLOSE THE LOOP</span>
+          <h2 id="reviewTitle">把这次对话写回记忆</h2>
+        </div>
+        <button class="icon-btn" type="button" data-close-dialog="reviewDialog" aria-label="关闭">×</button>
+      </header>
+      <div class="modal-body">
+        <p class="review-lead">AI 把这次对话压缩成了下面这些提案。只勾选你认可的条目，确认后才会写入错题本、失分总账与考察清单。</p>
+        <div id="reviewContent" class="review-content"></div>
+        <p class="review-warning" id="reviewWarning" hidden>没有可写回的条目。你仍然可以只保存这次对话。</p>
+      </div>
+      <footer class="modal-foot">
+        <button class="ghost-btn" id="reviewCancelBtn" type="button">取消，仅保存对话</button>
+        <button class="primary-btn" id="reviewConfirmBtn" type="button">确认写入</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <!-- 收录 AI 输出中的结构化错题 -->
+  <dialog class="modal slim" id="captureDialog" aria-labelledby="captureTitle">
+    <div class="modal-card">
+      <header class="modal-head">
+        <div>
+          <span class="eyebrow">CAPTURE</span>
+          <h2 id="captureTitle">收录这道错题？</h2>
+        </div>
+        <button class="icon-btn" type="button" data-close-dialog="captureDialog" aria-label="关闭">×</button>
+      </header>
+      <div class="modal-body" id="captureBody"></div>
+      <footer class="modal-foot">
+        <button class="ghost-btn" type="button" data-close-dialog="captureDialog">不用了</button>
+        <button class="primary-btn" id="captureConfirmBtn" type="button">写入错题本</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <input type="file" id="importFile" accept="application/json,.json" hidden>
+
+  <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
