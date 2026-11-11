@@ -8,7 +8,9 @@
 
 ![wtfihateexam 主界面](docs/screenshot.png)
 
-> **部署状态**：功能开发和本地验收已经完成；当前环境没有 GitHub 登录凭据，因此还没有推送到公开仓库。推送并开启 Pages 后，访问地址形如 `https://<你的 GitHub 用户名>.github.io/wtfihateexam/`。
+> **在线地址**：<https://gatsmellow.github.io/wtfihateexam/>  
+> **公开仓库**：<https://github.com/Gatsmellow/wtfihateexam>  
+> 功能开发、本地验收与 GitHub Pages 部署均已完成。站点无服务器、无账号系统、无数据收集；API Key 只存在访问者自己的浏览器里。
 
 ---
 
@@ -31,7 +33,7 @@ wtfihateexam 把一次学习收束成一个闭环：
 
 ## 快速开始
 
-1. 打开部署好的网页（或本地运行，见下文）。
+1. 打开在线地址 <https://gatsmellow.github.io/wtfihateexam/>（或本地运行，见下文）。
 2. 点右上角 **设置 Key**。
 3. 填自己的 DeepSeek API Key，点“保存设置”。Key 只保存在当前浏览器的 `localStorage`。
 4. 在左侧新建学科，填入学科名和该学科的 rules（可留空）。
@@ -163,7 +165,9 @@ web/
 ├── app.js              # 五段提示词、IndexedDB、聊天、关账、导入导出
 ├── style.css           # 全部样式（含手机端适配）
 ├── README.md
+├── LICENSE             # MIT
 ├── .nojekyll           # 告诉 GitHub Pages 不要走 Jekyll
+├── .gitignore
 └── docs/
     ├── screenshot.png  # 主界面截图
     ├── no-key.png      # 无 Key 引导页截图
@@ -173,10 +177,17 @@ web/
 
 ## 部署到 GitHub Pages
 
+本项目已经部署在：
+
+- 在线访问：<https://gatsmellow.github.io/wtfihateexam/>
+- 仓库地址：<https://github.com/Gatsmellow/wtfihateexam>
+
+当前 Pages 配置为 `main` 分支、根目录 `/ (root)`。如果要复刻一份：
+
 1. 新建 GitHub 仓库 `wtfihateexam`；
 2. 把本目录（`web/` 里的内容）推到 `main` 分支根目录；
 3. 仓库 **Settings → Pages**：Source 选 `Deploy from a branch`，分支 `main`，目录 `/ (root)`；
-4. 等 Actions/Pages 构建完成，访问 `https://<用户名>.github.io/wtfihateexam/`。
+4. 等 Pages 构建完成，访问 `https://<用户名>.github.io/wtfihateexam/`。
 
 因为根目录有 `index.html`，且前端全是相对路径，不需要任何构建配置。`.nojekyll` 已放好。
 
