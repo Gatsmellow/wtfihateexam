@@ -87,6 +87,23 @@ const SKILL_PROMPTS = {
 const STATUS_OPTIONS = ['待复习', '复习中', '已掌握'];
 const QUEUE_STATUS_OPTIONS = ['待办', '进行中', '已办'];
 
+/* 附件只存在当前页面的内存里，绝不写进 IndexedDB / localStorage / 导出文件。 */
+const ATTACHMENT_MAX_FILES = 8;
+const ATTACHMENT_MAX_IMAGE_BYTES = 6 * 1024 * 1024;
+const ATTACHMENT_MAX_FILE_BYTES = 8 * 1024 * 1024;
+const ATTACHMENT_MAX_TEXT_CHARS = 80000;
+const ATTACHMENT_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024;
+const ATTACHMENT_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+const ATTACHMENT_TEXT_EXTENSIONS = ['txt', 'md', 'markdown', 'docx'];
+// 没有统一的能力接口，用可维护的白名单/命名约定做发送前检查。
+// 用户换成本地中转的视觉模型时，把模型名加到这里即可。
+const VISION_MODEL_PATTERNS = [
+  /deepseek[-_ ]?v4[-_ ]?pro/i,
+  /(^|[\/_-])(vision|multimodal|vl)([\/_-]|$)/i,
+  /gpt-4o|gpt-4\.1|gpt-5|o4/i,
+  /gemini|claude-(3|4)|qwen.*vl|llava|pixtral/i
+];
+
 /* --------------------------------------------------------------------------
    小工具
    -------------------------------------------------------------------------- */
@@ -180,6 +197,230 @@ function safeJsonParse(text, fallback) {
 function truncateText(text, max) {
   const value = String(text || '');
   return value.length > max ? value.slice(0, max) + '…' : value;
+}
+
+/* --------------------------------------------------------------------------
+   附件：只进内存与 API 请求，不落盘、不写 localStorage。
+   -------------------------------------------------------------------------- */
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return value + ' B';
+  if (value < 1024 * 1024) return (value / 1024).toFixed(value < 10240 ? 1 : 0) + ' KB';
+  return (value / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+function modelSupportsVision(model) {
+  const name = String(model || '').trim();
+  if (!name) return false;
+  return VISION_MODEL_PATTERNS.some((pattern) => pattern.test(name));
+}
+
+function fileExtension(file) {
+  const name = String(file && file.name ? file.name : '');
+  const dot = name.lastIndexOf('.');
+  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
+}
+
+function attachmentKind(file) {
+  const ext = fileExtension(file);
+  if (ATTACHMENT_IMAGE_TYPES.indexOf(file.type) >= 0 || ['png', 'jpg', 'jpeg', 'webp'].indexOf(ext) >= 0) return 'image';
+  if (ATTACHMENT_TEXT_EXTENSIONS.indexOf(ext) >= 0) return 'text';
+  return '';
+}
+
+function imageMimeFor(file) {
+  const ext = fileExtension(file);
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+  if (ext === 'webp') return 'image/webp';
+  if (ext === 'png') return 'image/png';
+  return ATTACHMENT_IMAGE_TYPES.indexOf(file.type) >= 0 ? file.type : '';
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('读取图片失败'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function docxToText(file) {
+  const lib = window.mammoth;
+  if (!lib || typeof lib.extractRawText !== 'function') {
+    throw new Error('docx 解析库未加载，请刷新页面后重试');
+  }
+  const result = await lib.extractRawText({ arrayBuffer: await file.arrayBuffer() });
+  return String(result && result.value ? result.value : '');
+}
+
+async function fileToAttachment(file) {
+  const kind = attachmentKind(file);
+  if (!kind) throw new Error('只支持 png/jpg/jpeg/webp 图片和 txt/md/docx 文本');
+  if (file.size > ATTACHMENT_MAX_FILE_BYTES) {
+    throw new Error('文件超过 ' + formatBytes(ATTACHMENT_MAX_FILE_BYTES) + '，请压缩后再传');
+  }
+  if (kind === 'image') {
+    if (file.size > ATTACHMENT_MAX_IMAGE_BYTES) {
+      throw new Error('图片超过 ' + formatBytes(ATTACHMENT_MAX_IMAGE_BYTES) + '，请压缩后再传');
+    }
+    const mime = imageMimeFor(file);
+    if (!mime) throw new Error('无法识别图片格式');
+    let dataUrl = await readFileAsDataUrl(file);
+    if (!/^data:image\//i.test(dataUrl)) {
+      dataUrl = dataUrl.replace(/^data:[^;]*;/, 'data:' + mime + ';');
+    }
+    return {
+      id: uid(),
+      kind: 'image',
+      name: truncateText(file.name || '图片', 120),
+      size: file.size,
+      mime: mime,
+      dataUrl: dataUrl
+    };
+  }
+
+  const ext = fileExtension(file);
+  let content;
+  try {
+    content = ext === 'docx' ? await docxToText(file) : await file.text();
+  } catch (error) {
+    throw new Error(ext === 'docx' ? 'docx 解析失败：' + (error.message || error) : '读取文本失败：' + (error.message || error));
+  }
+  content = String(content || '').replace(/\r\n/g, '\n').trim();
+  if (!content) throw new Error('文件里没有可读取的文字');
+  if (content.length > ATTACHMENT_MAX_TEXT_CHARS) {
+    throw new Error('文本超过 ' + ATTACHMENT_MAX_TEXT_CHARS.toLocaleString('zh-CN') + ' 字，请截取后再传');
+  }
+  return {
+    id: uid(),
+    kind: 'text',
+    name: truncateText(file.name || '文本', 120),
+    size: file.size,
+    text: content,
+    format: ext === 'docx' ? 'DOCX' : ext.toUpperCase()
+  };
+}
+
+async function addPendingAttachments(fileList) {
+  if (state.streaming) { toast('AI 正在回复，等它说完再添加附件'); return; }
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  if (state.pendingAttachments.length >= ATTACHMENT_MAX_FILES) {
+    toast('一次最多带 ' + ATTACHMENT_MAX_FILES + ' 个附件', 'bad');
+    return;
+  }
+  const remaining = ATTACHMENT_MAX_FILES - state.pendingAttachments.length;
+  if (files.length > remaining) toast('一次最多带 ' + ATTACHMENT_MAX_FILES + ' 个附件，已忽略多余的', 'bad');
+  for (const file of files.slice(0, remaining)) {
+    try {
+      const attachment = await fileToAttachment(file);
+      if (attachment.kind === 'image') {
+        const imageBytes = state.pendingAttachments
+          .filter((item) => item.kind === 'image')
+          .reduce((sum, item) => sum + item.size, attachment.size);
+        if (imageBytes > ATTACHMENT_TOTAL_IMAGE_BYTES) {
+          throw new Error('待发送图片合计超过 ' + formatBytes(ATTACHMENT_TOTAL_IMAGE_BYTES));
+        }
+      }
+      state.pendingAttachments.push(attachment);
+    } catch (error) {
+      toast((file.name || '文件') + '：' + (error.message || error), 'bad');
+    }
+  }
+  renderPendingAttachments();
+}
+
+function removePendingAttachment(id) {
+  if (state.streaming) return;
+  state.pendingAttachments = state.pendingAttachments.filter((item) => item.id !== id);
+  renderPendingAttachments();
+  $('composer').focus();
+}
+
+function clearPendingAttachments() {
+  state.pendingAttachments = [];
+  renderPendingAttachments();
+}
+
+function extensionIcon(attachment) {
+  if (attachment.kind === 'image') return '';
+  return attachment.format || 'TXT';
+}
+
+function renderPendingAttachments() {
+  const wrap = $('attachmentStrip');
+  if (!wrap) return;
+  wrap.textContent = '';
+  const items = state.pendingAttachments;
+  if (!items.length) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  items.forEach((attachment) => {
+    const chip = el('div', 'attachment-chip');
+    if (attachment.kind === 'image') {
+      const img = document.createElement('img');
+      img.src = attachment.dataUrl;
+      img.alt = attachment.name;
+      chip.appendChild(img);
+    } else {
+      chip.appendChild(el('div', 'attachment-file-icon', extensionIcon(attachment)));
+    }
+    const meta = el('div', 'attachment-meta');
+    meta.append(
+      el('span', 'attachment-name', attachment.name),
+      el('span', 'attachment-size', (attachment.kind === 'image' ? '图片 · ' : '文本 · ') + formatBytes(attachment.size))
+    );
+    const remove = el('button', 'attachment-remove', '×');
+    remove.type = 'button';
+    remove.title = '移除附件';
+    remove.setAttribute('aria-label', '移除附件 ' + attachment.name);
+    remove.addEventListener('click', () => removePendingAttachment(attachment.id));
+    chip.append(meta, remove);
+    wrap.appendChild(chip);
+  });
+  if (items.some((item) => item.kind === 'image') && !modelSupportsVision(state.settings.model)) {
+    wrap.appendChild(el('div', 'attachment-warning', '当前模型未支持图片：批改图片请切换 deepseek-v4-pro（设置里可改）。'));
+  }
+}
+
+function attachmentsForMessage(messageId) {
+  return state.messageAttachments.get(messageId) || [];
+}
+
+function clearMessageAttachmentsForConversation(conversation) {
+  if (!conversation) return;
+  conversation.messages.forEach((message) => state.messageAttachments.delete(message.id));
+}
+
+function clearAllMessageAttachments() {
+  state.messageAttachments.clear();
+  clearPendingAttachments();
+}
+
+function attachmentApiText(message) {
+  const attachments = attachmentsForMessage(message.id);
+  const parts = [];
+  if (message.content && String(message.content).trim()) parts.push(String(message.content).trim());
+  const images = attachments.filter((item) => item.kind === 'image');
+  if (images.length) parts.push('（附图：' + images.map((item) => item.name).join('、') + '）');
+  attachments.filter((item) => item.kind === 'text').forEach((item) => {
+    parts.push('【附件：' + item.name + '】\n' + item.text);
+  });
+  return parts.join('\n\n');
+}
+
+// 把带附件的用户消息转成 OpenAI 多模态 content；纯文本仍保留字符串格式。
+function messageForApi(message) {
+  const attachments = attachmentsForMessage(message.id);
+  const images = attachments.filter((item) => item.kind === 'image');
+  const text = attachmentApiText(message);
+  if (!images.length) return { role: message.role, content: text || message.content };
+  const content = images.map((item) => ({ type: 'image_url', image_url: { url: item.dataUrl } }));
+  if (text) content.push({ type: 'text', text: text });
+  return { role: message.role, content: content };
 }
 
 function debounce(fn, wait) {
@@ -373,6 +614,9 @@ const state = {
   pendingCapture: null,
   reviewProposal: null,
   reviewAbort: null,
+  pendingAttachments: [],
+  // messageId -> 附件数组；只活在本页内存里，刷新即清空。
+  messageAttachments: new Map(),
   seeded: lsGet('seeded', '0') === '1'
 };
 
@@ -966,6 +1210,7 @@ function selectSubject(subjectId) {
   const mode = loadMode(subjectId);
   state.currentSkill = mode.skill;
   state.feynman = mode.feynman;
+  clearPendingAttachments();
   const recent = recentConversationFor(subjectId);
   state.currentConversationId = recent ? recent.id : null;
   state.chatError = '';
@@ -1087,8 +1332,32 @@ function renderMessages() {
   scrollToBottom(true);
 }
 
+function renderMessageAttachments(attachments) {
+  if (!attachments.length) return null;
+  const box = el('div', 'msg-attachments');
+  attachments.forEach((attachment) => {
+    if (attachment.kind === 'image') {
+      const img = document.createElement('img');
+      img.className = 'msg-attachment-image';
+      img.src = attachment.dataUrl;
+      img.alt = attachment.name;
+      img.title = attachment.name;
+      img.loading = 'lazy';
+      box.appendChild(img);
+    } else {
+      const chip = el('div', 'msg-file-chip');
+      const name = el('b', '', attachment.name);
+      const meta = el('span', '', (attachment.format || 'TXT') + ' · ' + formatBytes(attachment.size));
+      chip.append(name, meta);
+      box.appendChild(chip);
+    }
+  });
+  return box;
+}
+
 function renderMessageNode(message, conversation) {
   const isUser = message.role === 'user';
+  const attachments = isUser ? attachmentsForMessage(message.id) : [];
   const node = el('div', 'msg ' + (isUser ? 'user' : 'assistant'));
   node.dataset.messageId = message.id;
   node.appendChild(el('div', 'msg-avatar', isUser ? '我' : 'AI'));
@@ -1106,7 +1375,10 @@ function renderMessageNode(message, conversation) {
 
   const content = el('div', 'msg-content');
   if (isUser) {
-    content.textContent = message.content;
+    if (message.content) content.textContent = message.content;
+    if (message.content || !attachments.length) main.appendChild(content);
+    const attachmentBox = renderMessageAttachments(attachments);
+    if (attachmentBox) main.appendChild(attachmentBox);
   } else {
     const parsed = parseWrongCards(message.content);
     content.innerHTML = renderMarkdown(parsed.clean);
@@ -1130,8 +1402,8 @@ function renderMessageNode(message, conversation) {
       });
       content.appendChild(cards);
     }
+    main.appendChild(content);
   }
-  main.appendChild(content);
   node.appendChild(main);
   return node;
 }
@@ -1233,6 +1505,8 @@ function scrollToBottom(force) {
 function updateStreamingUI(active) {
   $('sendBtn').disabled = active;
   $('stopBtn').hidden = !active;
+  $('attachBtn').disabled = active;
+  $('attachmentInput').disabled = active;
   $('closeBtn').disabled = active || !getCurrentConversation() || !getCurrentConversation().messages.some((message) => message.role === 'assistant');
   $('newChatBtn').disabled = active || !getCurrentSubject();
 }
@@ -1307,6 +1581,7 @@ function selectConversation(conversationId) {
   state.feynman = conversation.feynman;
   state.expanded.add(conversation.subjectId);
   state.chatError = '';
+  clearPendingAttachments();
   lsSet('lastSubjectId', conversation.subjectId);
   lsSet('lastConversationId', conversationId);
   closeMobileSidebar();
@@ -1344,6 +1619,7 @@ async function deleteConversation(conversationId) {
     okLabel: '删除对话'
   });
   if (!ok) return;
+  clearMessageAttachmentsForConversation(conversation);
   await store.delete('conversations', conversationId);
   state.conversations = state.conversations.filter((item) => item.id !== conversationId);
   if (state.currentConversationId === conversationId) {
@@ -1362,7 +1638,7 @@ function buildRequestMessages(conversation, systemPrompt) {
   const history = conversation.messages
     .filter((message) => message.role === 'user' || (message.role === 'assistant' && String(message.content || '').trim()))
     .slice(-40)
-    .map((message) => ({ role: message.role, content: message.content }));
+    .map(messageForApi);
   return [{ role: 'system', content: systemPrompt }].concat(history);
 }
 
@@ -1373,9 +1649,15 @@ function autoTitleFrom(text) {
 async function sendMessage() {
   if (state.streaming) return;
   const text = $('composer').value.trim();
-  if (!text) return;
+  const pending = state.pendingAttachments.slice();
+  if (!text && !pending.length) return;
   if (!state.settings.apiKey) {
     toast('先填 API Key 才能发送', 'bad');
+    openSettings();
+    return;
+  }
+  if (pending.some((item) => item.kind === 'image') && !modelSupportsVision(state.settings.model)) {
+    toast('批改图片请切换 deepseek-v4-pro', 'bad');
     openSettings();
     return;
   }
@@ -1398,7 +1680,9 @@ async function sendMessage() {
   autoGrowComposer();
   const userMessage = normalizeMessage({ role: 'user', content: text });
   conversation.messages.push(userMessage);
-  if (conversation.title === '新对话') conversation.title = autoTitleFrom(text);
+  if (pending.length) state.messageAttachments.set(userMessage.id, pending);
+  clearPendingAttachments();
+  if (conversation.title === '新对话') conversation.title = autoTitleFrom(text || (pending[0] && pending[0].name) || '新对话');
   await persistConversation(conversation).catch((error) => toast('保存失败：' + error.message, 'bad'));
   renderAll();
 
@@ -1829,8 +2113,10 @@ async function deleteSubject(subjectId) {
   if (!ok) return;
   await store.delete('subjects', subjectId);
   for (const conversation of conversations) {
+    clearMessageAttachmentsForConversation(conversation);
     await store.delete('conversations', conversation.id).catch(() => {});
   }
+  clearPendingAttachments();
   state.subjects = state.subjects.filter((item) => item.id !== subjectId);
   state.conversations = state.conversations.filter((item) => item.subjectId !== subjectId);
   state.expanded.delete(subjectId);
@@ -2328,6 +2614,7 @@ async function saveSettings(event) {
   closeDialog('settingsDialog');
   renderHeader();
   renderAll();
+  renderPendingAttachments();
   toast(apiKey ? '设置已保存，key 只在你的浏览器里' : '设置已保存；还没有 key', apiKey ? 'good' : '');
 }
 
@@ -2466,6 +2753,7 @@ async function importWorkspaceFromFile(file) {
   }
   state.subjects = parsed.subjects;
   state.conversations = parsed.conversations;
+  clearAllMessageAttachments();
   state.currentSubjectId = parsed.subjects.length ? parsed.subjects[0].id : null;
   state.currentConversationId = null;
   state.expanded = new Set(state.currentSubjectId ? [state.currentSubjectId] : []);
@@ -2604,6 +2892,7 @@ function bindEvents() {
 
   $('newChatBtn').addEventListener('click', () => {
     if (!getCurrentSubject()) { openSubjectDialog(null); return; }
+    clearPendingAttachments();
     createConversation(state.currentSubjectId);
   });
   $('renameConvBtn').addEventListener('click', () => openRenameDialog(getCurrentConversation()));
@@ -2617,6 +2906,15 @@ function bindEvents() {
 
   $('sendBtn').addEventListener('click', sendMessage);
   $('stopBtn').addEventListener('click', stopStreaming);
+  $('attachBtn').addEventListener('click', () => {
+    if (state.streaming) return;
+    $('attachmentInput').click();
+  });
+  $('attachmentInput').addEventListener('change', (event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    addPendingAttachments(files);
+  });
   $('composer').addEventListener('input', autoGrowComposer);
   $('composer').addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
