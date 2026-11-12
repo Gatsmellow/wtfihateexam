@@ -96,9 +96,10 @@ const ATTACHMENT_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024;
 const ATTACHMENT_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
 const ATTACHMENT_TEXT_EXTENSIONS = ['txt', 'md', 'markdown', 'docx'];
 // 没有统一的能力接口，用可维护的白名单/命名约定做发送前检查。
+// DeepSeek 官方目前只有 deepseek-flash 支持图片；v4-pro 是纯文本模型。
 // 用户换成本地中转的视觉模型时，把模型名加到这里即可。
 const VISION_MODEL_PATTERNS = [
-  /deepseek[-_ ]?v4[-_ ]?pro/i,
+  /deepseek[-_ ]?flash/i,
   /(^|[\/_-])(vision|multimodal|vl)([\/_-]|$)/i,
   /gpt-4o|gpt-4\.1|gpt-5|o4/i,
   /gemini|claude-(3|4)|qwen.*vl|llava|pixtral/i
@@ -213,6 +214,23 @@ function modelSupportsVision(model) {
   const name = String(model || '').trim();
   if (!name) return false;
   return VISION_MODEL_PATTERNS.some((pattern) => pattern.test(name));
+}
+
+/* 从 paste 事件的 clipboardData 里取出图片/文件，兼容 items 与 files 两种形态。 */
+function clipboardFiles(data) {
+  if (!data) return [];
+  const files = [];
+  Array.from(data.items || []).forEach((item) => {
+    if (item.kind !== 'file') return;
+    const file = item.getAsFile();
+    if (file) files.push(file);
+  });
+  if (!files.length) Array.from(data.files || []).forEach((file) => files.push(file));
+  return files;
+}
+
+function clipboardHasText(data) {
+  return Array.from((data && data.items) || []).some((item) => item.kind === 'string');
 }
 
 function fileExtension(file) {
@@ -382,7 +400,7 @@ function renderPendingAttachments() {
     wrap.appendChild(chip);
   });
   if (items.some((item) => item.kind === 'image') && !modelSupportsVision(state.settings.model)) {
-    wrap.appendChild(el('div', 'attachment-warning', '当前模型未支持图片：批改图片请切换 deepseek-v4-pro（设置里可改）。'));
+    wrap.appendChild(el('div', 'attachment-warning', '当前模型未支持图片：DeepSeek 读图请切换 deepseek-flash（v4-pro 只能处理文字）。'));
   }
 }
 
@@ -1657,7 +1675,7 @@ async function sendMessage() {
     return;
   }
   if (pending.some((item) => item.kind === 'image') && !modelSupportsVision(state.settings.model)) {
-    toast('批改图片请切换 deepseek-v4-pro', 'bad');
+    toast('批改图片请切换 deepseek-flash（v4-pro 不支持图片）', 'bad');
     openSettings();
     return;
   }
@@ -2916,6 +2934,13 @@ function bindEvents() {
     addPendingAttachments(files);
   });
   $('composer').addEventListener('input', autoGrowComposer);
+  $('composer').addEventListener('paste', (event) => {
+    const files = clipboardFiles(event.clipboardData);
+    if (!files.length) return;
+    // 截图粘贴通常没有文字；纯文件时阻止浏览器把文件名/HTML 塞进输入框。
+    if (!clipboardHasText(event.clipboardData)) event.preventDefault();
+    addPendingAttachments(files);
+  });
   $('composer').addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault();

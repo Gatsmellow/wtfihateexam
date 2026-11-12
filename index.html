@@ -103,7 +103,7 @@
                   <path d="M21.4 11.6 12.3 20.7a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.4-8.4"/>
                 </svg>
               </button>
-              <textarea id="composer" rows="1" placeholder="把题目、你的答案或想问的问题贴在这里…" aria-label="输入消息"></textarea>
+              <textarea id="composer" rows="1" placeholder="把题目、答案或问题贴在这里；截图可直接 Ctrl+V 粘贴…" aria-label="输入消息"></textarea>
               <div class="composer-actions">
                 <button class="stop-btn" id="stopBtn" type="button" hidden>停止</button>
                 <button class="send-btn" id="sendBtn" type="button" title="发送" aria-label="发送">
@@ -163,7 +163,7 @@
         <div class="field">
           <label for="modelInput">模型名</label>
           <input id="modelInput" type="text" value="deepseek-chat" autocomplete="off" spellcheck="false">
-          <p class="field-hint">默认 <code>deepseek-chat</code>；发图片需支持 vision 的模型，例如 <code>deepseek-v4-pro</code>。</p>
+          <p class="field-hint">默认 <code>deepseek-chat</code>；读图请填 <code>deepseek-flash</code>（v4-pro 只支持文字）。</p>
         </div>
         <div class="field">
           <label for="apiKeyInput">API key</label>

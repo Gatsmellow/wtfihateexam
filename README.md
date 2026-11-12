@@ -57,7 +57,7 @@ wtfihateexam 把一次学习收束成一个闭环：
 - 支持停止生成（保留已生成的部分）。
 - 渲染标题、列表、引用、代码块、粗体、链接；所有模型输出先转义，不执行 HTML。
 - AI 按约定输出 `【错题卡】{...}` 时，会显示成可收录的卡片。
-- **图片 / 文档附件**：输入框左侧的回形针可一次选择多张图片（png / jpg / jpeg / webp）或文本文件（txt / md / docx）。图片以缩略图、文本以文件名显示在消息里，发送前可以逐个移除。docx 由本地 mammoth 转纯文本；图片按 OpenAI 多模态格式以 base64 data URL 发给 API。当前模型不支持图片时会提示切换 `deepseek-v4-pro`。
+- **图片 / 文档附件**：输入框左侧的回形针可一次选择多张图片（png / jpg / jpeg / webp）或文本文件（txt / md / docx）；截图也可以直接 Ctrl+V 粘贴。图片以缩略图、文本以文件名显示在消息里，发送前可以逐个移除。docx 由本地 mammoth 转纯文本；图片按 OpenAI 多模态格式以 base64 data URL 发给 API。DeepSeek 官方目前只有 `deepseek-flash` 支持读图，`deepseek-v4-pro` 只处理文字；当前模型不支持图片时会提示切换。官方能力说明：[DeepSeek 图像理解](https://api-docs.deepseek.com/zh-cn/guides/vision/)。
 
 ![图片和文档附件](docs/attachment.png)
 
@@ -87,7 +87,7 @@ wtfihateexam 把一次学习收束成一个闭环：
 ### 设置
 
 - API base URL，默认 `https://api.deepseek.com/v1`；
-- 模型名，默认 `deepseek-chat`；发图片需要支持 vision 的模型，例如 `deepseek-v4-pro`；
+- 模型名，默认 `deepseek-chat`；读图需要支持 vision 的模型，DeepSeek 官方用 `deepseek-flash`（`deepseek-v4-pro` 不支持图片）；
 - API Key，仅存当前浏览器 `localStorage`；
 - “测试连接”会请求 `/models` 并显示结果；
 - 调试开关：打开后发送消息时在控制台打印完整 system prompt，方便观察技能和费曼的变化。
