@@ -99,7 +99,7 @@
             </div>
             <div class="attachment-strip" id="attachmentStrip" hidden aria-label="待发送附件"></div>
             <div class="composer" id="composerBox">
-              <button class="attach-btn" id="attachBtn" type="button" title="添加图片或文本文件" aria-label="添加图片或文本文件">
+              <button class="attach-btn" id="attachBtn" type="button" title="添加图片或文档（pdf / docx / pptx 等）" aria-label="添加图片或文档">
                 <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <path d="M21.4 11.6 12.3 20.7a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.4-8.4"/>
                 </svg>
@@ -374,7 +374,7 @@
   </dialog>
 
   <input type="file" id="importFile" accept="application/json,.json" hidden>
-  <input type="file" id="attachmentInput" accept=".png,.jpg,.jpeg,.webp,.txt,.md,.docx,image/png,image/jpeg,image/webp,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple hidden>
+  <input type="file" id="attachmentInput" accept=".png,.jpg,.jpeg,.webp,.txt,.md,.markdown,.csv,.json,.html,.htm,.xml,.doc,.docx,.ppt,.pptx,.pdf,image/png,image/jpeg,image/webp,text/plain,text/markdown,text/csv,application/json,text/html,text/xml,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/pdf" multiple hidden>
 
   <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
 
@@ -382,6 +382,8 @@
   <script src="vendor/mammoth.browser.min.js"></script>
   <!-- KaTeX 只负责把模型输出的 LaTeX 排成公式；本地 vendored，无网络请求。 -->
   <script src="vendor/katex/katex.min.js"></script>
+  <!-- PDF.js 只负责在浏览器内提取 PDF 文字；本地 vendored，文件不离开本页。 -->
+  <script src="vendor/pdfjs/pdf.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

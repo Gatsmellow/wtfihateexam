@@ -94,7 +94,15 @@ const ATTACHMENT_MAX_FILE_BYTES = 8 * 1024 * 1024;
 const ATTACHMENT_MAX_TEXT_CHARS = 80000;
 const ATTACHMENT_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024;
 const ATTACHMENT_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
-const ATTACHMENT_TEXT_EXTENSIONS = ['txt', 'md', 'markdown', 'docx'];
+const ATTACHMENT_TEXT_EXTENSIONS = [
+  'txt', 'md', 'markdown', 'csv', 'json', 'html', 'htm', 'xml',
+  'doc', 'docx', 'ppt', 'pptx', 'pdf'
+];
+const ATTACHMENT_MAX_PDF_PAGES = 200;
+// PDF.js 的 worker、CMap 和标准字体全部走本地文件，不访问 CDN。
+if (window.pdfjsLib && window.pdfjsLib.GlobalWorkerOptions) {
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('vendor/pdfjs/pdf.worker.min.js', document.baseURI).href;
+}
 // 没有统一的能力接口，用可维护的白名单/命名约定做发送前检查。
 // DeepSeek 官方目前只有 deepseek-flash 支持图片；v4-pro 是纯文本模型。
 // 用户换成本地中转的视觉模型时，把模型名加到这里即可。
@@ -287,18 +295,277 @@ function readFileAsDataUrl(file) {
   });
 }
 
-async function docxToText(file) {
+async function docxBufferToText(buffer) {
   const lib = window.mammoth;
   if (!lib || typeof lib.extractRawText !== 'function') {
     throw new Error('docx 解析库未加载，请刷新页面后重试');
   }
-  const result = await lib.extractRawText({ arrayBuffer: await file.arrayBuffer() });
+  const result = await lib.extractRawText({ arrayBuffer: buffer });
   return String(result && result.value ? result.value : '');
+}
+
+async function docxToText(file) {
+  return docxBufferToText(await file.arrayBuffer());
+}
+
+/* --------------------------------------------------------------------------
+   常见文档：PDF / PPTX / 旧版 DOC、PPT
+   全部在浏览器内处理，附件不会上传到任何转换服务器。
+   -------------------------------------------------------------------------- */
+
+function isZipBuffer(buffer) {
+  const bytes = new Uint8Array(buffer);
+  return bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b &&
+    (bytes[2] === 3 || bytes[2] === 5 || bytes[2] === 7);
+}
+
+// 读取 ZIP 中央目录；PPTX/DOCX 本质都是 ZIP。这里只依赖浏览器原生 API。
+function readZipDirectory(buffer) {
+  const arrayBuffer = buffer instanceof ArrayBuffer ? buffer : buffer.buffer;
+  const bytes = new Uint8Array(arrayBuffer);
+  const view = new DataView(arrayBuffer);
+  let eocd = -1;
+  const min = Math.max(0, bytes.length - 22 - 65535);
+  for (let i = bytes.length - 22; i >= min; i -= 1) {
+    if (view.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('不是有效的 ZIP/Office 文件');
+  const count = view.getUint16(eocd + 10, true);
+  let offset = view.getUint32(eocd + 16, true);
+  const entries = new Map();
+  for (let i = 0; i < count; i += 1) {
+    if (offset + 46 > bytes.length || view.getUint32(offset, true) !== 0x02014b50) {
+      throw new Error('ZIP 目录损坏');
+    }
+    const method = view.getUint16(offset + 10, true);
+    const compressedSize = view.getUint32(offset + 20, true);
+    const uncompressedSize = view.getUint32(offset + 24, true);
+    const nameLength = view.getUint16(offset + 28, true);
+    const extraLength = view.getUint16(offset + 30, true);
+    const commentLength = view.getUint16(offset + 32, true);
+    const localOffset = view.getUint32(offset + 42, true);
+    const nameBytes = bytes.subarray(offset + 46, offset + 46 + nameLength);
+    const name = new TextDecoder('utf-8').decode(nameBytes);
+    entries.set(name, { method, compressedSize, uncompressedSize, localOffset });
+    offset += 46 + nameLength + extraLength + commentLength;
+  }
+  return { bytes, view, entries };
+}
+
+async function inflateRaw(bytes) {
+  if (typeof DecompressionStream === 'undefined') {
+    throw new Error('当前浏览器不支持解压 Office 文件，请使用新版 Chrome 或 Edge');
+  }
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function readZipText(zip, name) {
+  const entry = zip.entries.get(name);
+  if (!entry) throw new Error('Office 文件缺少内容：' + name);
+  if (entry.localOffset + 30 > zip.bytes.length) throw new Error('ZIP 文件偏移损坏');
+  const nameLength = zip.view.getUint16(entry.localOffset + 26, true);
+  const extraLength = zip.view.getUint16(entry.localOffset + 28, true);
+  const start = entry.localOffset + 30 + nameLength + extraLength;
+  const compressed = zip.bytes.subarray(start, start + entry.compressedSize);
+  let raw;
+  if (entry.method === 0) raw = compressed;
+  else if (entry.method === 8) raw = await inflateRaw(compressed);
+  else throw new Error('Office 文件使用了不支持的压缩方式');
+  if (entry.uncompressedSize && raw.length !== entry.uncompressedSize) {
+    throw new Error('Office 文件内容大小不符');
+  }
+  return new TextDecoder('utf-8').decode(raw).replace(/^\uFEFF/, '');
+}
+
+function xmlParserError(doc) {
+  return doc.getElementsByTagName('parsererror').length > 0;
+}
+
+async function pptxBufferToText(buffer) {
+  const zip = readZipDirectory(buffer);
+  const slideNames = Array.from(zip.entries.keys())
+    .filter((name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
+    .sort((a, b) => {
+      const na = Number((a.match(/slide(\d+)\.xml/i) || [])[1] || 0);
+      const nb = Number((b.match(/slide(\d+)\.xml/i) || [])[1] || 0);
+      return na - nb;
+    });
+  if (!slideNames.length) throw new Error('PPTX 里没有找到幻灯片');
+  const result = [];
+  for (const name of slideNames) {
+    const xml = await readZipText(zip, name);
+    const doc = new DOMParser().parseFromString(xml, 'application/xml');
+    if (xmlParserError(doc)) throw new Error('PPTX 幻灯片 XML 解析失败');
+    const paragraphs = doc.getElementsByTagNameNS('*', 'p');
+    const lines = [];
+    for (let i = 0; i < paragraphs.length; i += 1) {
+      const texts = paragraphs[i].getElementsByTagNameNS('*', 't');
+      let line = '';
+      for (let j = 0; j < texts.length; j += 1) line += texts[j].textContent || '';
+      if (line.trim()) lines.push(line.trim());
+    }
+    if (!lines.length) {
+      const texts = doc.getElementsByTagNameNS('*', 't');
+      const fallback = Array.from(texts).map((node) => node.textContent || '').join(' ').trim();
+      if (fallback) lines.push(fallback);
+    }
+    if (lines.length) {
+      const number = (name.match(/slide(\d+)\.xml/i) || [])[1] || '?';
+      result.push('--- 第 ' + number + ' 页 ---\n' + lines.join('\n'));
+    }
+  }
+  if (!result.length) throw new Error('PPTX 里没有可提取的文字');
+  return result.join('\n\n');
+}
+
+async function pptxToText(file) {
+  return pptxBufferToText(await file.arrayBuffer());
+}
+
+async function pdfToText(file) {
+  if (!window.pdfjsLib) throw new Error('PDF 解析库未加载，请刷新页面后重试');
+  const data = new Uint8Array(await file.arrayBuffer());
+  const base = document.baseURI;
+  const loadingTask = window.pdfjsLib.getDocument({
+    data,
+    cMapUrl: new URL('vendor/pdfjs/cmaps/', base).href,
+    cMapPacked: true,
+    standardFontDataUrl: new URL('vendor/pdfjs/standard_fonts/', base).href,
+    isEvalSupported: false,
+    useSystemFonts: true
+  });
+  const pdf = await loadingTask.promise;
+  const pages = [];
+  let total = 0;
+  try {
+    const limit = Math.min(pdf.numPages, ATTACHMENT_MAX_PDF_PAGES);
+    for (let number = 1; number <= limit; number += 1) {
+      const page = await pdf.getPage(number);
+      const content = await page.getTextContent();
+      let pageText = '';
+      content.items.forEach((item) => {
+        if (!item.str) return;
+        pageText += item.str;
+        pageText += item.hasEOL ? '\n' : ' ';
+      });
+      pageText = pageText.replace(/[ \t]+\n/g, '\n').replace(/[ \t]{2,}/g, ' ').trim();
+      if (pageText) {
+        pages.push('--- 第 ' + number + ' 页 ---\n' + pageText);
+        total += pageText.length;
+        if (total >= ATTACHMENT_MAX_TEXT_CHARS) break;
+      }
+      page.cleanup();
+    }
+  } finally {
+    try { await pdf.destroy(); } catch (error) { /* ignore */ }
+  }
+  if (!pages.length) {
+    throw new Error('PDF 里没有可提取的文字，可能是扫描件；请改传图片或文字');
+  }
+  return pages.join('\n\n');
+}
+
+// 旧版 .doc/.ppt 是 OLE 二进制，浏览器不能像 OpenXML 那样精确解析。
+// 这里做保守的文本流提取，并在请求里明确标注“尽力提取”，不假装完整。
+function legacyPrintable(code) {
+  return (code >= 32 && code <= 126) ||
+    (code >= 0x00a0 && code <= 0x06ff) ||
+    (code >= 0x0900 && code <= 0x0eff) ||
+    (code >= 0x1e00 && code <= 0x1eff) ||
+    (code >= 0x2000 && code <= 0x206f) ||
+    (code >= 0x3000 && code <= 0x30ff) ||
+    (code >= 0x4e00 && code <= 0x9fff) ||
+    (code >= 0xac00 && code <= 0xd7af) ||
+    (code >= 0xff00 && code <= 0xffef);
+}
+
+function legacyHasReadable(text) {
+  return /[\p{L}\p{N}]/u.test(text);
+}
+
+function extractLegacyUtf16Runs(bytes, offset) {
+  const runs = [];
+  let current = '';
+  for (let i = offset; i + 1 < bytes.length; i += 2) {
+    const code = bytes[i] | (bytes[i + 1] << 8);
+    if (code === 13 || code === 7 || code === 12 || code === 11) {
+      if (current) current += '\n';
+      continue;
+    }
+    if (code === 9) {
+      if (current) current += '\t';
+      continue;
+    }
+    if (legacyPrintable(code)) {
+      current += String.fromCharCode(code);
+    } else {
+      if (current.trim().length >= 8 && legacyHasReadable(current)) runs.push(current.trim());
+      current = '';
+    }
+  }
+  if (current.trim().length >= 8 && legacyHasReadable(current)) runs.push(current.trim());
+  return runs;
+}
+
+function extractLegacyAsciiRuns(bytes) {
+  const runs = [];
+  let current = '';
+  for (let i = 0; i < bytes.length; i += 1) {
+    const code = bytes[i];
+    if (code === 13 || code === 10 || code === 9) {
+      if (current) current += code === 9 ? '\t' : '\n';
+    } else if (code >= 32 && code <= 126) {
+      current += String.fromCharCode(code);
+    } else {
+      if (current.trim().length >= 12 && legacyHasReadable(current)) runs.push(current.trim());
+      current = '';
+    }
+  }
+  if (current.trim().length >= 12 && legacyHasReadable(current)) runs.push(current.trim());
+  return runs;
+}
+
+function extractLegacyText(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const utf16Candidates = [0, 1]
+    .map((offset) => extractLegacyUtf16Runs(bytes, offset).join('\n'))
+    .sort((a, b) => b.length - a.length);
+  let text = utf16Candidates[0] || '';
+  if (text.length < 200) {
+    const ascii = extractLegacyAsciiRuns(bytes).join('\n');
+    if (ascii.length > text.length) text = ascii;
+  }
+  return text.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+async function legacyOfficeToText(file, ext) {
+  const buffer = await file.arrayBuffer();
+  if (isZipBuffer(buffer)) {
+    return {
+      text: ext === 'doc' ? await docxBufferToText(buffer) : await pptxBufferToText(buffer),
+      converted: true
+    };
+  }
+  const text = extractLegacyText(buffer);
+  if (text.length < 20) {
+    throw new Error('旧版 ' + ext.toUpperCase() + ' 无法提取有效文字；请在 Office/WPS 里另存为 .' + (ext === 'doc' ? 'docx' : 'pptx') + ' 或 PDF 后再传');
+  }
+  return { text, converted: false };
+}
+
+function attachmentFormat(ext) {
+  const labels = {
+    txt: 'TXT', md: 'MD', markdown: 'MD', csv: 'CSV', json: 'JSON',
+    html: 'HTML', htm: 'HTML', xml: 'XML', doc: 'DOC', docx: 'DOCX',
+    ppt: 'PPT', pptx: 'PPTX', pdf: 'PDF'
+  };
+  return labels[ext] || (ext ? ext.toUpperCase() : 'TXT');
 }
 
 async function fileToAttachment(file) {
   const kind = attachmentKind(file);
-  if (!kind) throw new Error('只支持 png/jpg/jpeg/webp 图片和 txt/md/docx 文本');
+  if (!kind) throw new Error('只支持图片（png/jpg/jpeg/webp）和文档（txt/md/csv/json/html/xml/doc/docx/ppt/pptx/pdf）');
   if (file.size > ATTACHMENT_MAX_FILE_BYTES) {
     throw new Error('文件超过 ' + formatBytes(ATTACHMENT_MAX_FILE_BYTES) + '，请压缩后再传');
   }
@@ -324,10 +591,23 @@ async function fileToAttachment(file) {
 
   const ext = fileExtension(file);
   let content;
+  let note = '';
   try {
-    content = ext === 'docx' ? await docxToText(file) : await file.text();
+    if (ext === 'pdf') content = await pdfToText(file);
+    else if (ext === 'pptx') content = await pptxToText(file);
+    else if (ext === 'docx') content = await docxToText(file);
+    else if (ext === 'doc' || ext === 'ppt') {
+      const legacy = await legacyOfficeToText(file, ext);
+      content = legacy.text;
+      if (!legacy.converted) {
+        note = '【旧版 ' + ext.toUpperCase() + '：浏览器只能尽力提取文字，表格、图片和版式可能缺失】';
+      }
+    } else {
+      content = await file.text();
+    }
   } catch (error) {
-    throw new Error(ext === 'docx' ? 'docx 解析失败：' + (error.message || error) : '读取文本失败：' + (error.message || error));
+    const label = attachmentFormat(ext);
+    throw new Error(label + ' 解析失败：' + (error.message || error));
   }
   content = String(content || '').replace(/\r\n/g, '\n').trim();
   if (!content) throw new Error('文件里没有可读取的文字');
@@ -340,7 +620,8 @@ async function fileToAttachment(file) {
     name: truncateText(file.name || '文本', 120),
     size: file.size,
     text: content,
-    format: ext === 'docx' ? 'DOCX' : ext.toUpperCase()
+    format: attachmentFormat(ext),
+    note: note
   };
 }
 
@@ -413,7 +694,7 @@ function renderPendingAttachments() {
     const meta = el('div', 'attachment-meta');
     meta.append(
       el('span', 'attachment-name', attachment.name),
-      el('span', 'attachment-size', (attachment.kind === 'image' ? '图片 · ' : '文本 · ') + formatBytes(attachment.size))
+      el('span', 'attachment-size', (attachment.kind === 'image' ? '图片 · ' : '文档 · ') + formatBytes(attachment.size))
     );
     const remove = el('button', 'attachment-remove', '×');
     remove.type = 'button';
@@ -449,6 +730,7 @@ function attachmentApiText(message) {
   const images = attachments.filter((item) => item.kind === 'image');
   if (images.length) parts.push('（附图：' + images.map((item) => item.name).join('、') + '）');
   attachments.filter((item) => item.kind === 'text').forEach((item) => {
+    if (item.note) parts.push(item.note);
     parts.push('【附件：' + item.name + '】\n' + item.text);
   });
   return parts.join('\n\n');
