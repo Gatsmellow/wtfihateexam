@@ -195,6 +195,30 @@ function safeJsonParse(text, fallback) {
   try { return JSON.parse(text); } catch (error) { return fallback; }
 }
 
+// 模型常在 JSON 字符串里直接写 LaTeX（如 \(x\)、\frac、\text），
+// 这些反斜杠不是合法 JSON 转义；先补成双反斜杠，再解析。
+function repairJsonBackslashes(text) {
+  const source = String(text == null ? '' : text);
+  let out = '';
+  for (let i = 0; i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch !== '\\') { out += ch; continue; }
+    const next = source[i + 1];
+    if (next === '\\' || next === '"' || next === '/') {
+      out += '\\' + next;
+      i += 1;
+      continue;
+    }
+    if (next === 'u' && /^[0-9a-fA-F]{4}$/.test(source.slice(i + 2, i + 6))) {
+      out += source.slice(i, i + 6);
+      i += 5;
+      continue;
+    }
+    out += '\\\\';
+  }
+  return out;
+}
+
 function truncateText(text, max) {
   const value = String(text || '');
   return value.length > max ? value.slice(0, max) + '…' : value;
@@ -949,20 +973,72 @@ async function streamChatCompletion(messages, onDelta, signal) {
 }
 
 /* --------------------------------------------------------------------------
-   Markdown 渲染（先转义，再生成受控标签；不执行模型输出的 HTML）
+   Markdown / LaTeX 渲染（先转义，再生成受控标签；不执行模型输出的 HTML）
    -------------------------------------------------------------------------- */
+
+// 把一段 LaTeX 交给本地 KaTeX 排版；失败时退回纯文本，绝不让整条消息崩掉。
+function renderLatex(tex, display) {
+  const source = String(tex || '').trim();
+  if (!source) return '';
+  let rendered = '';
+  if (window.katex && typeof window.katex.renderToString === 'function') {
+    try {
+      rendered = window.katex.renderToString(source, {
+        displayMode: !!display,
+        throwOnError: false,
+        strict: 'ignore',
+        trust: false,
+        output: 'htmlAndMathml'
+      });
+    } catch (error) {
+      rendered = '<code class="math-raw">' + escapeHtml(source) + '</code>';
+    }
+  } else {
+    rendered = '<code class="math-raw">' + escapeHtml(source) + '</code>';
+  }
+  if (display) return '<div class="math-display">' + rendered + '</div>';
+  return '<span class="math-inline">' + rendered + '</span>';
+}
+
+// 先把行内公式换成占位符，避免 Markdown 规则误伤公式里的下划线、星号。
+function extractInlineMath(value) {
+  const expressions = [];
+  const text = String(value || '').replace(/\\\(([\s\S]*?)\\\)/g, function (match, tex) {
+    const token = '\u0000I' + expressions.length + '\u0000';
+    expressions.push(tex);
+    return token;
+  });
+  return { text: text, expressions: expressions };
+}
+
 function inlineMarkdown(value) {
-  let text = escapeHtml(value);
+  const extracted = extractInlineMath(value);
+  let text = escapeHtml(extracted.text);
   text = text.replace(/`([^`\n]+)`/g, '<code>$1</code>');
   text = text.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
   text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, function (match, label, url) {
     return '<a href="' + escapeAttr(url) + '" target="_blank" rel="noopener noreferrer">' + label + '</a>';
   });
-  return text;
+  return text.replace(/\u0000I(\d+)\u0000/g, function (match, index) {
+    const tex = extracted.expressions[Number(index)];
+    return tex == null ? '' : renderLatex(tex, false);
+  });
+}
+
+// 行间公式单独抽出来，交给 renderMarkdown 生成块级公式。
+function extractDisplayMath(source) {
+  const expressions = [];
+  const text = String(source || '').replace(/\\\[([\s\S]*?)\\\]|\$\$([\s\S]*?)\$\$/g, function (match, bracket, dollars) {
+    const token = '\u0000D' + expressions.length + '\u0000';
+    expressions.push(bracket != null ? bracket : dollars);
+    return '\n' + token + '\n';
+  });
+  return { text: text, expressions: expressions };
 }
 
 function renderMarkdown(source) {
-  const text = String(source || '').replace(/\r\n/g, '\n');
+  const prepared = extractDisplayMath(String(source || '').replace(/\r\n/g, '\n'));
+  const text = prepared.text;
   const lines = text.split('\n');
   const html = [];
   let paragraph = [];
@@ -1001,6 +1077,13 @@ function renderMarkdown(source) {
     if (inCode) { codeLines.push(line); continue; }
 
     if (!line.trim()) { flushParagraph(); flushList(); continue; }
+
+    const displayMath = line.trim().match(/^\u0000D(\d+)\u0000$/);
+    if (displayMath) {
+      flushParagraph(); flushList();
+      html.push(renderLatex(prepared.expressions[Number(displayMath[1])], true));
+      continue;
+    }
 
     const heading = line.match(/^(#{1,4})\s+(.+)$/);
     if (heading) {
@@ -1059,7 +1142,7 @@ function parseWrongCards(content) {
   const regex = /^[ \t]*【错题卡】[ \t]*(\{.*\})[ \t]*$/gm;
   let match;
   while ((match = regex.exec(String(content || ''))) !== null) {
-    const raw = safeJsonParse(match[1], null);
+    const raw = safeJsonParse(repairJsonBackslashes(match[1]), null);
     if (raw && typeof raw === 'object') {
       const card = normalizeQuestion(raw);
       if (card.number && (card.reason || card.strategy)) cards.push(card);
@@ -1411,7 +1494,9 @@ function renderMessageNode(message, conversation) {
         cardNode.append(el('span', 'wrongq-card-icon', '错'));
         const text = el('div', 'wrongq-card-text');
         const title = el('b', '', card.number + ' · ');
-        text.append(title, document.createTextNode(card.reason || '待补充错因'));
+        const reason = document.createElement('span');
+        reason.innerHTML = inlineMarkdown(card.reason || '待补充错因');
+        text.append(title, reason);
         const button = el('button', '', '收录');
         button.type = 'button';
         button.addEventListener('click', () => openCaptureDialog(card));
@@ -2401,7 +2486,7 @@ function extractJsonObject(text) {
   const end = value.lastIndexOf('}');
   if (start < 0 || end <= start) throw new Error('AI 没有返回 JSON 对象。');
   const sliced = value.slice(start, end + 1);
-  try { return JSON.parse(sliced); } catch (error) {
+  try { return JSON.parse(repairJsonBackslashes(sliced)); } catch (error) {
     throw new Error('AI 返回的 JSON 无法解析：' + error.message);
   }
 }

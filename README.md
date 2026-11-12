@@ -4,7 +4,7 @@
 
 一个**纯静态、零依赖、零构建**的 BYOK 学习工作台。打开网页，填入你自己的 DeepSeek API Key，就可以按学科整理错题、记录失分、和 AI 一起把薄弱点补上。
 
-业务代码只有 `index.html`、`app.js`、`style.css` 三个文件，没有 npm、没有打包步骤、没有后端。唯一的第三方库是本地存放的 `vendor/mammoth.browser.min.js`，只用于在浏览器里把 `.docx` 转成纯文本；它不联网、不参与构建。改一句文案，用记事本就能完成。
+业务代码只有 `index.html`、`app.js`、`style.css` 三个文件，没有 npm、没有打包步骤、没有后端。第三方库只有两个，都放在仓库里、不联网、不参与构建：`vendor/mammoth.browser.min.js` 用于在浏览器里把 `.docx` 转成纯文本，`vendor/katex/` 用于把模型输出的 LaTeX 渲染成正常公式。改一句文案，用记事本就能完成。
 
 ![wtfihateexam 主界面](docs/screenshot.png)
 
@@ -56,10 +56,13 @@ wtfihateexam 把一次学习收束成一个闭环：
 - 原生 `fetch` + `ReadableStream` 解析 DeepSeek 的 SSE 流，逐字显示。
 - 支持停止生成（保留已生成的部分）。
 - 渲染标题、列表、引用、代码块、粗体、链接；所有模型输出先转义，不执行 HTML。
-- AI 按约定输出 `【错题卡】{...}` 时，会显示成可收录的卡片。
+- **公式渲染**：模型按常见 Markdown 习惯输出 `\(...\)`（行内）、`\[...\]` 或 `$$...$$`（独立成行）的 LaTeX，页面用本地 KaTeX 排版成正常公式；纯文本里的 `$...$` 不强行识别，避免把价格或普通符号误当公式。渲染失败时退回等宽原文，不吞内容。
+- AI 按约定输出 `【错题卡】{...}` 时，会显示成可收录的卡片；错因里的公式也会排版。
 - **图片 / 文档附件**：输入框左侧的回形针可一次选择多张图片（png / jpg / jpeg / webp）或文本文件（txt / md / docx）；截图也可以直接 Ctrl+V 粘贴。图片以缩略图、文本以文件名显示在消息里，发送前可以逐个移除。docx 由本地 mammoth 转纯文本；图片按 OpenAI 多模态格式以 base64 data URL 发给 API。DeepSeek 官方目前只有 `deepseek-flash` 支持读图，`deepseek-v4-pro` 只处理文字；当前模型不支持图片时会提示切换。官方能力说明：[DeepSeek 图像理解](https://api-docs.deepseek.com/zh-cn/guides/vision/)。
 
 ![图片和文档附件](docs/attachment.png)
+
+![公式渲染](docs/math.png)
 
 ### 记忆库
 
@@ -107,7 +110,7 @@ wtfihateexam 把一次学习收束成一个闭环：
 - 学科、rules、错题、总账、考察清单、对话都存在浏览器的 **IndexedDB**（数据库名 `wtfihateexam`）；IndexedDB 不可用时降级到 `localStorage`。
 - 聊天请求由浏览器**直接**发往你填写的 API base URL（默认 DeepSeek）。本站没有后端转发，不记录请求。
 - 图片与文档附件**只留在当前页面内存**：不写入 IndexedDB / localStorage，不进入导出文件；刷新或关闭页面即消失。文字消息仍会正常保存。
-- 没有统计脚本、没有 Cookie、没有第三方字体或 CDN；docx 解析库是仓库内的本地文件，不从网络加载。
+- 没有统计脚本、没有 Cookie、没有 CDN；docx 解析库和 KaTeX 公式库（含字体）都是仓库内的本地文件，不从网络加载。
 - 清空浏览器站点数据会丢失本地工作区，请定期用“导出”备份。
 
 ## 本地运行
@@ -176,12 +179,18 @@ web/
 ├── docs/
 │   ├── screenshot.png  # 主界面截图
 │   ├── attachment.png  # 图片 / 文档附件截图
+│   ├── math.png        # 公式渲染截图
 │   ├── no-key.png      # 无 Key 引导页截图
 │   ├── cors-check.png  # 阶段零 CORS 实测截图（401 也带 CORS 头）
 │   └── test-cors.html  # 阶段零跨域侦察页（留档）
 └── vendor/
     ├── mammoth.browser.min.js  # 本地 docx→纯文本库（不联网）
-    └── mammoth.LICENSE.txt     # BSD-2-Clause
+    ├── mammoth.LICENSE.txt     # BSD-2-Clause
+    └── katex/                  # 本地 KaTeX 0.16.22（公式渲染，不联网）
+        ├── katex.min.js
+        ├── katex.min.css
+        ├── LICENSE             # MIT
+        └── fonts/*.woff2
 ```
 
 ## 部署到 GitHub Pages
@@ -202,7 +211,8 @@ web/
 
 ## 技术约定
 
-- 无框架、无构建、无 CDN、无远程第三方脚本；docx 解析使用仓库内本地 mammoth 文件。
+- 无框架、无构建、无 CDN、无远程第三方脚本；docx 解析使用仓库内本地 mammoth 文件，公式渲染使用仓库内本地 KaTeX 文件。
+- 模型输出先统一转义；Markdown 只生成受控标签，LaTeX 交给 KaTeX（`trust: false`），不执行模型给出的 HTML。
 - 所有业务代码在一个 `app.js` 里，按“常量 → 存储 → 提示词 → API → 渲染 → 交互 → 导入导出”分段；附件逻辑在 API 和渲染之间，以内存 Map 维护。
 - 数据只存本地；所有网络请求由用户浏览器直连用户配置的 API。
 - 代码注释使用中文。

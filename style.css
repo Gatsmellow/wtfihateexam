@@ -803,6 +803,29 @@ a { color: var(--green); }
 .msg-content th { background: var(--paper-deep); }
 .msg-content .md-table-wrap { overflow-x: auto; }
 
+/* KaTeX 公式：行内跟随正文，行间公式单独成块并可横向滚动 */
+.msg-content .math-inline { font-size: 1.02em; }
+.msg-content .katex { font-size: 1.02em; }
+.msg-content .math-display {
+  margin: 12px 0;
+  padding: 10px 14px;
+  overflow-x: auto;
+  background: rgba(255, 253, 248, .72);
+  border-left: 2px solid #d8c9b6;
+  border-radius: 3px;
+}
+.msg-content .math-display .katex-display { margin: 0; }
+.msg-content .math-display .katex-display > .katex { white-space: nowrap; }
+.msg-content .math-raw {
+  padding: 2px 5px;
+  color: #8a3a2e;
+  background: #f1e8df;
+  font-family: var(--mono);
+  font-size: .9em;
+  white-space: pre-wrap;
+}
+.wrongq-card-text .katex { font-size: .96em; }
+
 .stream-cursor {
   display: inline-block;
   width: 6px;
@@ -1381,6 +1404,7 @@ a { color: var(--green); }
   .msg { gap: 8px; }
   .msg-avatar { width: 24px; height: 24px; flex-basis: 24px; font-size: 11px; }
   .msg-content { font-size: 12.5px; }
+  .msg-content .math-display { margin: 9px 0; padding: 8px 6px; }
   .toasts { right: 12px; bottom: 12px; left: 12px; align-items: stretch; }
   .toast { max-width: none; }
 }
