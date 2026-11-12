@@ -539,6 +539,36 @@ function extractLegacyText(buffer) {
   return text.replace(/\n{3,}/g, '\n\n').trim();
 }
 
+// 旧版 PPT 的正文在 TextCharsAtom(0x0FA0)/TextBytesAtom(0x0FA8) 记录里。
+// 直接扫记录头比“猜 UTF-16 对齐”可靠得多；这两个记录的 recVer/recInstance 必须为 0。
+function extractPptText(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  const parts = [];
+  // 母版里的占位提示不是正文，过滤掉，避免把“Click to edit Master...”发给模型。
+  const placeholder = /^(Click to edit (Master|the outline).*|(Second|Third|Fourth|Fifth|Sixth|Seventh) (Outline Level|level))$/;
+  for (let i = 0; i + 8 <= bytes.length; i += 1) {
+    if (bytes[i] !== 0 || bytes[i + 1] !== 0) continue;
+    const type = bytes[i + 2] | (bytes[i + 3] << 8);
+    if (type !== 0x0fa0 && type !== 0x0fa8) continue;
+    const length = view.getUint32(i + 4, true);
+    if (!length || length > 1024 * 1024 || i + 8 + length > bytes.length) continue;
+    let text = '';
+    if (type === 0x0fa0) {
+      if (length % 2 !== 0) continue;
+      text = new TextDecoder('utf-16le').decode(bytes.subarray(i + 8, i + 8 + length));
+    } else {
+      text = new TextDecoder('windows-1252').decode(bytes.subarray(i + 8, i + 8 + length));
+    }
+    const lines = text.replace(/\0/g, '').split(/\r\n|\r|\n|\v/)
+      .map((line) => line.trim())
+      .filter((line) => line && /[\p{L}\p{N}]/u.test(line) && !placeholder.test(line));
+    if (lines.length) parts.push(lines.join('\n'));
+    i += 7 + length;
+  }
+  return parts.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 async function legacyOfficeToText(file, ext) {
   const buffer = await file.arrayBuffer();
   if (isZipBuffer(buffer)) {
@@ -547,7 +577,7 @@ async function legacyOfficeToText(file, ext) {
       converted: true
     };
   }
-  const text = extractLegacyText(buffer);
+  const text = ext === 'ppt' ? extractPptText(buffer) : extractLegacyText(buffer);
   if (text.length < 20) {
     throw new Error('旧版 ' + ext.toUpperCase() + ' 无法提取有效文字；请在 Office/WPS 里另存为 .' + (ext === 'doc' ? 'docx' : 'pptx') + ' 或 PDF 后再传');
   }
