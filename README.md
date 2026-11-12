@@ -183,7 +183,7 @@ web/
 ├── docs/
 │   ├── screenshot.png  # 主界面截图
 │   ├── attachment.png  # 图片 / 文档附件截图
-│   ├── documents.png   # PDF / PPTX / DOCX 附件截图
+│   ├── documents.png   # PDF / PPTX / DOCX / 旧版 DOC/PPT 附件截图
 │   ├── math.png        # 公式渲染截图
 │   ├── no-key.png      # 无 Key 引导页截图
 │   ├── cors-check.png  # 阶段零 CORS 实测截图（401 也带 CORS 头）
