@@ -99,7 +99,7 @@
             </div>
             <div class="attachment-strip" id="attachmentStrip" hidden aria-label="待发送附件"></div>
             <div class="composer" id="composerBox">
-              <button class="attach-btn" id="attachBtn" type="button" title="添加图片或文档（pdf / docx / pptx 等）" aria-label="添加图片或文档">
+              <button class="attach-btn" id="attachBtn" type="button" title="添加图片或文档（手写 PDF 会自动转页面图）" aria-label="添加图片或文档">
                 <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <path d="M21.4 11.6 12.3 20.7a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.4-8.4"/>
                 </svg>
@@ -235,6 +235,28 @@
       <footer class="modal-foot">
         <button class="ghost-btn" type="button" data-close-dialog="renameDialog">取消</button>
         <button class="primary-btn" type="submit">保存</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- PDF 页数超过单条消息上限时，选择要渲染的页码范围 -->
+  <dialog class="modal slim" id="pdfRangeDialog" aria-labelledby="pdfRangeTitle">
+    <form class="modal-card" id="pdfRangeForm" method="dialog">
+      <header class="modal-head">
+        <h2 id="pdfRangeTitle">选择 PDF 页码范围</h2>
+        <button class="icon-btn" type="button" data-close-dialog="pdfRangeDialog" aria-label="关闭">×</button>
+      </header>
+      <div class="modal-body">
+        <p class="field-hint" id="pdfRangeHint"></p>
+        <div class="field">
+          <label for="pdfRangeInput">页码范围</label>
+          <input id="pdfRangeInput" type="text" inputmode="numeric" placeholder="例如 1-12" autocomplete="off" required>
+          <p class="field-hint">单条消息最多渲染 12 页；剩余页可以分次上传。页码范围格式如 1-12 或 3。</p>
+        </div>
+      </div>
+      <footer class="modal-foot">
+        <button class="ghost-btn" type="button" data-close-dialog="pdfRangeDialog">取消</button>
+        <button class="primary-btn" type="submit">渲染这些页</button>
       </footer>
     </form>
   </dialog>
@@ -382,7 +404,7 @@
   <script src="vendor/mammoth.browser.min.js"></script>
   <!-- KaTeX 只负责把模型输出的 LaTeX 排成公式；本地 vendored，无网络请求。 -->
   <script src="vendor/katex/katex.min.js"></script>
-  <!-- PDF.js 只负责在浏览器内提取 PDF 文字；本地 vendored，文件不离开本页。 -->
+  <!-- PDF.js 在浏览器内提取文字或渲染页面图；本地 vendored，文件不离开本页。 -->
   <script src="vendor/pdfjs/pdf.min.js"></script>
   <script src="app.js"></script>
 </body>

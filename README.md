@@ -4,7 +4,7 @@
 
 一个**纯静态、零依赖、零构建**的 BYOK 学习工作台。打开网页，填入你自己的 DeepSeek API Key，就可以按学科整理错题、记录失分、和 AI 一起把薄弱点补上。
 
-业务代码只有 `index.html`、`app.js`、`style.css` 三个文件，没有 npm、没有打包步骤、没有后端。第三方库都放在仓库里、不联网、不参与构建：`vendor/mammoth.browser.min.js` 把 `.docx` 转成纯文本，`vendor/katex/` 把模型输出的 LaTeX 渲染成正常公式，`vendor/pdfjs/` 在浏览器内读取 PDF 文字。改一句文案，用记事本就能完成。
+业务代码只有 `index.html`、`app.js`、`style.css` 三个文件，没有 npm、没有打包步骤、没有后端。第三方库都放在仓库里、不联网、不参与构建：`vendor/mammoth.browser.min.js` 把 `.docx` 转成纯文本，`vendor/katex/` 把模型输出的 LaTeX 渲染成正常公式，`vendor/pdfjs/` 在浏览器内读取 PDF 文字、并把页面渲染成图片。改一句文案，用记事本就能完成。
 
 ![wtfihateexam 主界面](docs/screenshot.png)
 
@@ -59,12 +59,15 @@ wtfihateexam 把一次学习收束成一个闭环：
 - **公式渲染**：模型按常见 Markdown 习惯输出 `\(...\)`（行内）、`\[...\]` 或 `$$...$$`（独立成行）的 LaTeX，页面用本地 KaTeX 排版成正常公式；纯文本里的 `$...$` 不强行识别，避免把价格或普通符号误当公式。渲染失败时退回等宽原文，不吞内容。
 - AI 按约定输出 `【错题卡】{...}` 时，会显示成可收录的卡片；错因里的公式也会排版。
 - **图片 / 文档附件**：输入框左侧的回形针可一次选择多张图片（png / jpg / jpeg / webp）或文档（txt / md / csv / json / html / xml / pdf / doc / docx / ppt / pptx）；截图也可以直接 Ctrl+V 粘贴。图片以缩略图、文档以文件名显示在消息里，发送前可以逐个移除。图片按 OpenAI 多模态格式以 base64 data URL 发给 API；文档在浏览器内提取为纯文本，再随消息发给 API。DeepSeek 官方目前只有 `deepseek-flash` 支持读图，`deepseek-v4-pro` 只处理文字；当前模型不支持图片时会提示切换。官方能力说明：[DeepSeek 图像理解](https://api-docs.deepseek.com/zh-cn/guides/vision/)。
-- **文档提取边界**：PDF 只提取内嵌文字，扫描件（纯图片 PDF）没有 OCR，会提示改传图片；`.docx` 用本地 mammoth；`.pptx` 和 `.pdf` 用仓库内库解析；旧版 `.doc` / `.ppt` 是 OLE 二进制，浏览器只能尽力提取文字，表格、图片和版式可能缺失，页面会明确标注，建议优先另存为 `.docx` / `.pptx` / PDF。
-- 附件在内存里处理，不经过任何转换服务器；页面上限为单文件 8 MB、一次 8 个附件。
+- **手写 / 扫描 PDF**：先尝试 PDF 内嵌文字层；没有文字层时（数位板手写、拍照扫描）自动用 PDF.js 在本机逐页渲染成图片，按多模态 `image_url` 发给 `deepseek-flash`，不再把空白文字层当成答案。已有文字层的 PDF 如果 OCR 层不可靠，可以在待发送附件上点 **“按图片识别”** 手动切到页面图模式。单条消息最多渲染 **12 页**；超长 PDF 会弹出页码范围对话框，默认 `1-12`，剩余页请分次上传。默认 170 DPI，页面图只留在当前页面内存，刷新即消失。
+- **文档提取边界**：`.docx` 用本地 mammoth；`.pptx` 用原生 ZIP 解压 + XML 读取；旧版 `.doc` / `.ppt` 是 OLE 二进制，浏览器只能尽力提取文字，表格、图片和版式可能缺失，页面会明确标注，建议优先另存为 `.docx` / `.pptx` / PDF。PDF 页面图不做 OCR，直接交给视觉模型；扫描件需要 `deepseek-flash`。
+- 附件在内存里处理，不经过任何转换服务器；页面上限为单文件 8 MB（PDF 30 MB）、一次 8 个附件、PDF 页面图合计最多 12 页。
 
 ![图片和文档附件](docs/attachment.png)
 
 ![PDF、PPTX、DOCX、旧版 DOC/PPT 文档附件](docs/documents.png)
+
+![手写 PDF 自动转页面图](docs/pdf-images.png)
 
 ![公式渲染](docs/math.png)
 
@@ -113,8 +116,8 @@ wtfihateexam 把一次学习收束成一个闭环：
 - API Key 只写入 `localStorage['wtfihateexam.apiKey']`，不会发给本站作者，也不会进入导出文件。
 - 学科、rules、错题、总账、考察清单、对话都存在浏览器的 **IndexedDB**（数据库名 `wtfihateexam`）；IndexedDB 不可用时降级到 `localStorage`。
 - 聊天请求由浏览器**直接**发往你填写的 API base URL（默认 DeepSeek）。本站没有后端转发，不记录请求。
-- 图片与文档附件**只留在当前页面内存**：不写入 IndexedDB / localStorage，不进入导出文件；刷新或关闭页面即消失。文字消息仍会正常保存。
-- 没有统计脚本、没有 Cookie、没有 CDN；docx、PDF、PPTX 解析库和 KaTeX 公式库（含字体）都是仓库内的本地文件，不从网络加载。
+- 图片、文档附件和由 PDF 渲染出的页面图**只留在当前页面内存**：不写入 IndexedDB / localStorage，不进入导出文件；刷新或关闭页面即消失。文字消息仍会正常保存。
+- 没有统计脚本、没有 Cookie、没有 CDN；docx、PDF、PPTX 解析库和 KaTeX 公式库（含字体）都是仓库内的本地文件，不从网络加载。PDF 的解析和页面渲染都在本机浏览器完成，PDF 文件不会发给本站。
 - 清空浏览器站点数据会丢失本地工作区，请定期用“导出”备份。
 
 ## 本地运行
@@ -184,6 +187,7 @@ web/
 │   ├── screenshot.png  # 主界面截图
 │   ├── attachment.png  # 图片 / 文档附件截图
 │   ├── documents.png   # PDF / PPTX / DOCX / 旧版 DOC/PPT 附件截图
+│   ├── pdf-images.png  # 手写 PDF 自动转页面图截图
 │   ├── math.png        # 公式渲染截图
 │   ├── no-key.png      # 无 Key 引导页截图
 │   ├── cors-check.png  # 阶段零 CORS 实测截图（401 也带 CORS 头）
@@ -196,7 +200,7 @@ web/
     │   ├── katex.min.css
     │   ├── LICENSE             # MIT
     │   └── fonts/*.woff2
-    └── pdfjs/                  # 本地 PDF.js 3.11.174（PDF 取字，不联网）
+    └── pdfjs/                  # 本地 PDF.js 3.11.174（PDF 取字/渲染页面，不联网）
         ├── pdf.min.js
         ├── pdf.worker.min.js
         ├── LICENSE             # Apache-2.0
@@ -222,7 +226,7 @@ web/
 
 ## 技术约定
 
-- 无框架、无构建、无 CDN、无远程第三方脚本；docx 用仓库内本地 mammoth，PPTX 用浏览器原生 `DecompressionStream` + XML 解析，PDF 用仓库内本地 PDF.js，公式用仓库内本地 KaTeX。
+- 无框架、无构建、无 CDN、无远程第三方脚本；docx 用仓库内本地 mammoth，PPTX 用浏览器原生 `DecompressionStream` + XML 解析，PDF 用仓库内本地 PDF.js（文字层 + 页面渲染），公式用仓库内本地 KaTeX。
 - 模型输出先统一转义；Markdown 只生成受控标签，LaTeX 交给 KaTeX（`trust: false`），不执行模型给出的 HTML。
 - 所有业务代码在一个 `app.js` 里，按“常量 → 存储 → 提示词 → API → 渲染 → 交互 → 导入导出”分段；附件逻辑在 API 和渲染之间，以内存 Map 维护。
 - 数据只存本地；所有网络请求由用户浏览器直连用户配置的 API。

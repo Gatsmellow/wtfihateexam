@@ -91,8 +91,15 @@ const QUEUE_STATUS_OPTIONS = ['待办', '进行中', '已办'];
 const ATTACHMENT_MAX_FILES = 8;
 const ATTACHMENT_MAX_IMAGE_BYTES = 6 * 1024 * 1024;
 const ATTACHMENT_MAX_FILE_BYTES = 8 * 1024 * 1024;
+// 试卷 PDF 常含扫描图，单独放宽到 30MB；真正发出去的仍是最多 12 页页面图。
+const ATTACHMENT_MAX_PDF_BYTES = 30 * 1024 * 1024;
 const ATTACHMENT_MAX_TEXT_CHARS = 80000;
 const ATTACHMENT_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024;
+// 手写 PDF 单条消息最多渲染 12 页，避免视觉 token 和内存双双失控。
+const ATTACHMENT_MAX_PDF_IMAGE_PAGES = 12;
+const PDF_RENDER_DPI = 170;
+const PDF_RENDER_MAX_EDGE = 1800;
+const PDF_RENDER_JPEG_QUALITY = 0.88;
 const ATTACHMENT_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
 const ATTACHMENT_TEXT_EXTENSIONS = [
   'txt', 'md', 'markdown', 'csv', 'json', 'html', 'htm', 'xml',
@@ -286,6 +293,28 @@ function imageMimeFor(file) {
   return ATTACHMENT_IMAGE_TYPES.indexOf(file.type) >= 0 ? file.type : '';
 }
 
+// 附件里是否含视觉内容（普通图片或 PDF 页面图）。
+function attachmentHasVisual(attachment) {
+  if (!attachment) return false;
+  return attachment.kind === 'image' || (attachment.kind === 'pdf-images' && attachment.images && attachment.images.length > 0);
+}
+
+// data URL 的近似字节数，用于限制单条消息的视觉附件总大小。
+function dataUrlByteSize(dataUrl) {
+  const comma = String(dataUrl || '').indexOf(',');
+  if (comma < 0) return 0;
+  return Math.ceil((dataUrl.length - comma - 1) * 0.75);
+}
+
+function attachmentVisualBytes(attachment) {
+  if (!attachment) return 0;
+  if (attachment.kind === 'image') return dataUrlByteSize(attachment.dataUrl);
+  if (attachment.kind === 'pdf-images') {
+    return (attachment.images || []).reduce((sum, page) => sum + dataUrlByteSize(page.dataUrl), 0);
+  }
+  return 0;
+}
+
 function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -423,7 +452,7 @@ async function pptxToText(file) {
   return pptxBufferToText(await file.arrayBuffer());
 }
 
-async function pdfToText(file) {
+async function openPdf(file) {
   if (!window.pdfjsLib) throw new Error('PDF 解析库未加载，请刷新页面后重试');
   const data = new Uint8Array(await file.arrayBuffer());
   const base = document.baseURI;
@@ -435,13 +464,17 @@ async function pdfToText(file) {
     isEvalSupported: false,
     useSystemFonts: true
   });
-  const pdf = await loadingTask.promise;
+  return loadingTask.promise;
+}
+
+// 只抽取 PDF 文字层；扫描件/手写件通常没有文字，由调用方回退到页面图。
+async function extractPdfText(pdf) {
   const pages = [];
   let total = 0;
-  try {
-    const limit = Math.min(pdf.numPages, ATTACHMENT_MAX_PDF_PAGES);
-    for (let number = 1; number <= limit; number += 1) {
-      const page = await pdf.getPage(number);
+  const limit = Math.min(pdf.numPages, ATTACHMENT_MAX_PDF_PAGES);
+  for (let number = 1; number <= limit; number += 1) {
+    const page = await pdf.getPage(number);
+    try {
       const content = await page.getTextContent();
       let pageText = '';
       content.items.forEach((item) => {
@@ -455,15 +488,113 @@ async function pdfToText(file) {
         total += pageText.length;
         if (total >= ATTACHMENT_MAX_TEXT_CHARS) break;
       }
+    } finally {
       page.cleanup();
     }
+  }
+  if (!pages.length) {
+    throw new Error('PDF 里没有可提取的文字（可能是扫描/手写件）');
+  }
+  return pages.join('\n\n');
+}
+
+async function pdfToText(file) {
+  const pdf = await openPdf(file);
+  try {
+    return await extractPdfText(pdf);
   } finally {
     try { await pdf.destroy(); } catch (error) { /* ignore */ }
   }
-  if (!pages.length) {
-    throw new Error('PDF 里没有可提取的文字，可能是扫描件；请改传图片或文字');
+}
+
+// 把一页 PDF 渲染成 JPEG data URL；170 DPI 足够读手写，同时控制体积。
+async function renderPdfPage(pdf, number) {
+  const page = await pdf.getPage(number);
+  try {
+    const baseViewport = page.getViewport({ scale: 1 });
+    let scale = PDF_RENDER_DPI / 72;
+    const longest = Math.max(baseViewport.width, baseViewport.height) * scale;
+    if (longest > PDF_RENDER_MAX_EDGE) scale *= PDF_RENDER_MAX_EDGE / longest;
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.ceil(viewport.width));
+    canvas.height = Math.max(1, Math.ceil(viewport.height));
+    const context = canvas.getContext('2d', { alpha: false });
+    if (!context) throw new Error('浏览器无法创建 PDF 渲染画布');
+    context.fillStyle = '#ffffff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: context, viewport, background: '#ffffff' }).promise;
+    return canvas.toDataURL('image/jpeg', PDF_RENDER_JPEG_QUALITY);
+  } finally {
+    page.cleanup();
   }
-  return pages.join('\n\n');
+}
+
+// 按页码范围渲染页面；页数硬限制在这里再兜一次底。
+async function pdfPageImages(pdf, start, end) {
+  const count = end - start + 1;
+  if (count < 1 || count > ATTACHMENT_MAX_PDF_IMAGE_PAGES) {
+    throw new Error('单条消息最多渲染 ' + ATTACHMENT_MAX_PDF_IMAGE_PAGES + ' 页 PDF');
+  }
+  const images = [];
+  for (let number = start; number <= end; number += 1) {
+    images.push({ page: number, dataUrl: await renderPdfPage(pdf, number) });
+  }
+  return images;
+}
+
+function pdfRangeLabel(start, end) {
+  return start === end ? '第 ' + start + ' 页' : '第 ' + start + '-' + end + ' 页';
+}
+
+function parsePdfRange(value, total, maxPages) {
+  const text = String(value || '').trim().replace(/[–—~至]/g, '-');
+  const match = text.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = match[2] ? Number(match[2]) : start;
+  if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
+  if (start < 1 || end < start || end > total) return null;
+  if (end - start + 1 > maxPages) return null;
+  return { start, end };
+}
+
+// 超过页数上限时弹自定义对话框；不依赖浏览器 prompt，移动端也能用。
+function askPdfPageRange(total, maxPages) {
+  const max = Math.min(maxPages, ATTACHMENT_MAX_PDF_IMAGE_PAGES, total);
+  if (max < 1) return Promise.reject(new Error('单条消息最多渲染 ' + ATTACHMENT_MAX_PDF_IMAGE_PAGES + ' 页 PDF'));
+  if (total <= max) return Promise.resolve({ start: 1, end: total });
+  if (state.pdfRangeResolve) return Promise.reject(new Error('请先完成当前页码范围的选择'));
+
+  const dialog = document.getElementById('pdfRangeDialog');
+  const hint = document.getElementById('pdfRangeHint');
+  const input = document.getElementById('pdfRangeInput');
+  if (!dialog || !hint || !input) {
+    const fallback = window.prompt('这本 PDF 共 ' + total + ' 页，单条消息最多 ' + max + ' 页。请输入页码范围（例如 1-' + max + '）：', '1-' + max);
+    if (fallback === null) return Promise.resolve(null);
+    const range = parsePdfRange(fallback, total, max);
+    return range ? Promise.resolve(range) : Promise.reject(new Error('页码范围格式不正确'));
+  }
+
+  state.pdfRangeTotal = total;
+  state.pdfRangeMax = max;
+  hint.textContent = '这本 PDF 共 ' + total + ' 页，单条消息最多 ' + max + ' 页。可以只渲染其中一段，剩余页请分次上传。';
+  input.value = '1-' + max;
+  input.setCustomValidity('');
+  return new Promise((resolve) => {
+    state.pdfRangeResolve = resolve;
+    dialog.showModal();
+    input.focus();
+    input.select();
+  });
+}
+
+function settlePdfRange(range) {
+  const resolve = state.pdfRangeResolve;
+  state.pdfRangeResolve = null;
+  const dialog = document.getElementById('pdfRangeDialog');
+  if (dialog && dialog.open) dialog.close();
+  if (resolve) resolve(range);
 }
 
 // 旧版 .doc/.ppt 是 OLE 二进制，浏览器不能像 OpenXML 那样精确解析。
@@ -593,11 +724,86 @@ function attachmentFormat(ext) {
   return labels[ext] || (ext ? ext.toUpperCase() : 'TXT');
 }
 
+// 已占用的 PDF 图片页数（转换某个已有附件时把它自己排除）。
+function usedPdfImagePages(excludeId) {
+  return state.pendingAttachments.reduce((sum, attachment) => {
+    if (!attachment || attachment.id === excludeId || attachment.kind !== 'pdf-images') return sum;
+    return sum + attachment.images.length;
+  }, 0);
+}
+
+async function pdfImagesFromDoc(pdf, file, existing, excludeId) {
+  const remaining = ATTACHMENT_MAX_PDF_IMAGE_PAGES - usedPdfImagePages(excludeId);
+  if (remaining < 1) throw new Error('单条消息最多渲染 ' + ATTACHMENT_MAX_PDF_IMAGE_PAGES + ' 页 PDF，请先移除一些页面图');
+  const range = await askPdfPageRange(pdf.numPages, remaining);
+  if (!range) throw new Error('已取消 PDF 图片识别');
+  const images = await pdfPageImages(pdf, range.start, range.end);
+  const attachment = {
+    id: (existing && existing.id) || uid(),
+    kind: 'pdf-images',
+    name: truncateText((existing && existing.name) || file.name || 'PDF', 120),
+    size: file.size,
+    format: 'PDF',
+    pageCount: pdf.numPages,
+    range: range,
+    images: images,
+    sourceFile: file,
+    note: '【PDF 图片模式：' + pdfRangeLabel(range.start, range.end) + '已渲染为图片，模型直接读取页面；图片只在当前页面内存，刷新即消失】'
+  };
+  if (attachmentVisualBytes(attachment) > ATTACHMENT_TOTAL_IMAGE_BYTES) {
+    throw new Error('渲染出的页面图合计超过 ' + formatBytes(ATTACHMENT_TOTAL_IMAGE_BYTES) + '，请减少页数');
+  }
+  return attachment;
+}
+
+async function pdfImagesAttachment(file, existing, excludeId) {
+  const pdf = await openPdf(file);
+  try {
+    return await pdfImagesFromDoc(pdf, file, existing, excludeId);
+  } finally {
+    try { await pdf.destroy(); } catch (error) { /* ignore */ }
+  }
+}
+
+// PDF 优先读文字层；没有文字层（扫描/手写）自动回退为页面图。
+async function pdfToAttachment(file) {
+  const pdf = await openPdf(file);
+  try {
+    let text = '';
+    try {
+      text = await extractPdfText(pdf);
+    } catch (error) {
+      if (!/没有可提取的文字/.test(error.message || '')) throw error;
+    }
+    if (text) {
+      if (text.length > ATTACHMENT_MAX_TEXT_CHARS) {
+        throw new Error('PDF 文字超过 ' + ATTACHMENT_MAX_TEXT_CHARS.toLocaleString('zh-CN') + ' 字，请截取后再传');
+      }
+      return {
+        id: uid(),
+        kind: 'text',
+        name: truncateText(file.name || 'PDF', 120),
+        size: file.size,
+        text: text,
+        format: 'PDF',
+        pageCount: pdf.numPages,
+        sourceFile: file,
+        note: '【PDF 文字模式：只读取了 PDF 的文字层，没有渲染页面；手写/扫描内容请点“按图片识别”】'
+      };
+    }
+    return await pdfImagesFromDoc(pdf, file, null, null);
+  } finally {
+    try { await pdf.destroy(); } catch (error) { /* ignore */ }
+  }
+}
+
 async function fileToAttachment(file) {
   const kind = attachmentKind(file);
   if (!kind) throw new Error('只支持图片（png/jpg/jpeg/webp）和文档（txt/md/csv/json/html/xml/doc/docx/ppt/pptx/pdf）');
-  if (file.size > ATTACHMENT_MAX_FILE_BYTES) {
-    throw new Error('文件超过 ' + formatBytes(ATTACHMENT_MAX_FILE_BYTES) + '，请压缩后再传');
+  const ext = fileExtension(file);
+  const fileLimit = ext === 'pdf' ? ATTACHMENT_MAX_PDF_BYTES : ATTACHMENT_MAX_FILE_BYTES;
+  if (file.size > fileLimit) {
+    throw new Error('文件超过 ' + formatBytes(fileLimit) + '，请压缩后再传');
   }
   if (kind === 'image') {
     if (file.size > ATTACHMENT_MAX_IMAGE_BYTES) {
@@ -619,11 +825,10 @@ async function fileToAttachment(file) {
     };
   }
 
-  const ext = fileExtension(file);
   let content;
   let note = '';
   try {
-    if (ext === 'pdf') content = await pdfToText(file);
+    if (ext === 'pdf') return await pdfToAttachment(file);
     else if (ext === 'pptx') content = await pptxToText(file);
     else if (ext === 'docx') content = await docxToText(file);
     else if (ext === 'doc' || ext === 'ppt') {
@@ -668,13 +873,10 @@ async function addPendingAttachments(fileList) {
   for (const file of files.slice(0, remaining)) {
     try {
       const attachment = await fileToAttachment(file);
-      if (attachment.kind === 'image') {
-        const imageBytes = state.pendingAttachments
-          .filter((item) => item.kind === 'image')
-          .reduce((sum, item) => sum + item.size, attachment.size);
-        if (imageBytes > ATTACHMENT_TOTAL_IMAGE_BYTES) {
-          throw new Error('待发送图片合计超过 ' + formatBytes(ATTACHMENT_TOTAL_IMAGE_BYTES));
-        }
+      const visualBytes = state.pendingAttachments.reduce((sum, item) => sum + attachmentVisualBytes(item), 0) +
+        attachmentVisualBytes(attachment);
+      if (visualBytes > ATTACHMENT_TOTAL_IMAGE_BYTES) {
+        throw new Error('待发送图片合计超过 ' + formatBytes(ATTACHMENT_TOTAL_IMAGE_BYTES));
       }
       state.pendingAttachments.push(attachment);
     } catch (error) {
@@ -689,6 +891,34 @@ function removePendingAttachment(id) {
   state.pendingAttachments = state.pendingAttachments.filter((item) => item.id !== id);
   renderPendingAttachments();
   $('composer').focus();
+}
+
+// 手动把文字模式 PDF 改成页面图模式；渲染过程只在本页内存。
+async function convertPendingPdfToImages(id) {
+  if (state.streaming || state.pdfConverting) return;
+  const attachment = state.pendingAttachments.find((item) => item.id === id);
+  if (!attachment || attachment.kind !== 'text' || !attachment.sourceFile) return;
+  state.pdfConverting = true;
+  try {
+    const converted = await pdfImagesAttachment(attachment.sourceFile, attachment, attachment.id);
+    if (!converted) return;
+    const otherBytes = state.pendingAttachments.reduce((sum, item) => {
+      return sum + (item.id === id ? 0 : attachmentVisualBytes(item));
+    }, 0);
+    if (otherBytes + attachmentVisualBytes(converted) > ATTACHMENT_TOTAL_IMAGE_BYTES) {
+      throw new Error('其他图片加上这些页面图会超过 ' + formatBytes(ATTACHMENT_TOTAL_IMAGE_BYTES) + '，请先移除部分附件');
+    }
+    const index = state.pendingAttachments.findIndex((item) => item.id === id);
+    if (index < 0) return;
+    state.pendingAttachments[index] = converted;
+    renderPendingAttachments();
+    toast('已转为图片模式：' + pdfRangeLabel(converted.range.start, converted.range.end));
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    if (!/已取消/.test(message)) toast('PDF 转图片失败：' + message, 'bad');
+  } finally {
+    state.pdfConverting = false;
+  }
 }
 
 function clearPendingAttachments() {
@@ -713,29 +943,45 @@ function renderPendingAttachments() {
   wrap.hidden = false;
   items.forEach((attachment) => {
     const chip = el('div', 'attachment-chip');
-    if (attachment.kind === 'image') {
+    const visual = attachmentHasVisual(attachment);
+    if (visual) {
       const img = document.createElement('img');
-      img.src = attachment.dataUrl;
+      img.src = attachment.kind === 'image' ? attachment.dataUrl : attachment.images[0].dataUrl;
       img.alt = attachment.name;
       chip.appendChild(img);
     } else {
       chip.appendChild(el('div', 'attachment-file-icon', extensionIcon(attachment)));
     }
+    let detail = '文档 · ' + formatBytes(attachment.size);
+    if (attachment.kind === 'image') detail = '图片 · ' + formatBytes(attachment.size);
+    else if (attachment.kind === 'pdf-images') {
+      detail = 'PDF · 图片模式 · ' + pdfRangeLabel(attachment.range.start, attachment.range.end) + ' · ' + formatBytes(attachment.size);
+    } else if (attachment.format === 'PDF') {
+      detail = 'PDF · 文字模式' + (attachment.pageCount ? ' · ' + attachment.pageCount + ' 页' : '') + ' · ' + formatBytes(attachment.size);
+    }
     const meta = el('div', 'attachment-meta');
     meta.append(
       el('span', 'attachment-name', attachment.name),
-      el('span', 'attachment-size', (attachment.kind === 'image' ? '图片 · ' : '文档 · ') + formatBytes(attachment.size))
+      el('span', 'attachment-size', detail)
     );
     const remove = el('button', 'attachment-remove', '×');
     remove.type = 'button';
     remove.title = '移除附件';
     remove.setAttribute('aria-label', '移除附件 ' + attachment.name);
     remove.addEventListener('click', () => removePendingAttachment(attachment.id));
-    chip.append(meta, remove);
+    if (attachment.kind === 'text' && attachment.format === 'PDF' && attachment.sourceFile) {
+      const mode = el('button', 'attachment-mode', '按图片识别');
+      mode.type = 'button';
+      mode.title = '手写/扫描 PDF 改用页面图交给视觉模型';
+      mode.addEventListener('click', () => convertPendingPdfToImages(attachment.id));
+      chip.append(meta, mode, remove);
+    } else {
+      chip.append(meta, remove);
+    }
     wrap.appendChild(chip);
   });
-  if (items.some((item) => item.kind === 'image') && !modelSupportsVision(state.settings.model)) {
-    wrap.appendChild(el('div', 'attachment-warning', '当前模型未支持图片：DeepSeek 读图请切换 deepseek-flash（v4-pro 只能处理文字）。'));
+  if (items.some(attachmentHasVisual) && !modelSupportsVision(state.settings.model)) {
+    wrap.appendChild(el('div', 'attachment-warning', '当前模型未支持图片：手写 PDF/图片请切换 deepseek-flash（v4-pro 只能处理文字）。'));
   }
 }
 
@@ -757,8 +1003,17 @@ function attachmentApiText(message) {
   const attachments = attachmentsForMessage(message.id);
   const parts = [];
   if (message.content && String(message.content).trim()) parts.push(String(message.content).trim());
-  const images = attachments.filter((item) => item.kind === 'image');
-  if (images.length) parts.push('（附图：' + images.map((item) => item.name).join('、') + '）');
+  const visuals = attachments.filter(attachmentHasVisual);
+  if (visuals.length) {
+    const labels = visuals.map((item) => {
+      if (item.kind === 'pdf-images') return item.name + '（PDF 图片模式，' + pdfRangeLabel(item.range.start, item.range.end) + '）';
+      return item.name;
+    });
+    parts.push('（附图：' + labels.join('、') + '）');
+  }
+  attachments.filter((item) => item.kind === 'pdf-images').forEach((item) => {
+    if (item.note) parts.push(item.note);
+  });
   attachments.filter((item) => item.kind === 'text').forEach((item) => {
     if (item.note) parts.push(item.note);
     parts.push('【附件：' + item.name + '】\n' + item.text);
@@ -769,10 +1024,19 @@ function attachmentApiText(message) {
 // 把带附件的用户消息转成 OpenAI 多模态 content；纯文本仍保留字符串格式。
 function messageForApi(message) {
   const attachments = attachmentsForMessage(message.id);
-  const images = attachments.filter((item) => item.kind === 'image');
+  const visuals = [];
+  attachments.forEach((item) => {
+    if (item.kind === 'image') {
+      visuals.push({ dataUrl: item.dataUrl, name: item.name });
+    } else if (item.kind === 'pdf-images') {
+      item.images.forEach((page) => {
+        visuals.push({ dataUrl: page.dataUrl, name: item.name + ' 第 ' + page.page + ' 页' });
+      });
+    }
+  });
   const text = attachmentApiText(message);
-  if (!images.length) return { role: message.role, content: text || message.content };
-  const content = images.map((item) => ({ type: 'image_url', image_url: { url: item.dataUrl } }));
+  if (!visuals.length) return { role: message.role, content: text || message.content };
+  const content = visuals.map((item) => ({ type: 'image_url', image_url: { url: item.dataUrl } }));
   if (text) content.push({ type: 'text', text: text });
   return { role: message.role, content: content };
 }
@@ -971,6 +1235,11 @@ const state = {
   pendingAttachments: [],
   // messageId -> 附件数组；只活在本页内存里，刷新即清空。
   messageAttachments: new Map(),
+  // 页码范围对话框的 Promise 解析器，仅内存。
+  pdfRangeResolve: null,
+  pdfRangeTotal: 0,
+  pdfRangeMax: 0,
+  pdfConverting: false,
   seeded: lsGet('seeded', '0') === '1'
 };
 
@@ -1757,10 +2026,30 @@ function renderMessageAttachments(attachments) {
       img.title = attachment.name;
       img.loading = 'lazy';
       box.appendChild(img);
+    } else if (attachment.kind === 'pdf-images') {
+      const pages = el('div', 'msg-pdf-pages');
+      attachment.images.forEach((page) => {
+        const img = document.createElement('img');
+        img.className = 'msg-attachment-image';
+        img.src = page.dataUrl;
+        img.alt = attachment.name + ' 第 ' + page.page + ' 页';
+        img.title = attachment.name + ' · 第 ' + page.page + ' 页';
+        img.loading = 'lazy';
+        pages.appendChild(img);
+      });
+      box.appendChild(pages);
+      const chip = el('div', 'msg-file-chip');
+      const name = el('b', '', attachment.name);
+      const meta = el('span', '', 'PDF · 图片模式 · ' + pdfRangeLabel(attachment.range.start, attachment.range.end) + ' · ' + formatBytes(attachment.size));
+      chip.append(name, meta);
+      box.appendChild(chip);
     } else {
       const chip = el('div', 'msg-file-chip');
       const name = el('b', '', attachment.name);
-      const meta = el('span', '', (attachment.format || 'TXT') + ' · ' + formatBytes(attachment.size));
+      const metaText = attachment.format === 'PDF' && attachment.pageCount
+        ? 'PDF · 文字模式 · ' + attachment.pageCount + ' 页 · ' + formatBytes(attachment.size)
+        : (attachment.format || 'TXT') + ' · ' + formatBytes(attachment.size);
+      const meta = el('span', '', metaText);
       chip.append(name, meta);
       box.appendChild(chip);
     }
@@ -2063,6 +2352,7 @@ function autoTitleFrom(text) {
 
 async function sendMessage() {
   if (state.streaming) return;
+  if (state.pdfConverting) { toast('PDF 正在转页面图，请稍等'); return; }
   const text = $('composer').value.trim();
   const pending = state.pendingAttachments.slice();
   if (!text && !pending.length) return;
@@ -2071,7 +2361,7 @@ async function sendMessage() {
     openSettings();
     return;
   }
-  if (pending.some((item) => item.kind === 'image') && !modelSupportsVision(state.settings.model)) {
+  if (pending.some(attachmentHasVisual) && !modelSupportsVision(state.settings.model)) {
     toast('批改图片请切换 deepseek-flash（v4-pro 不支持图片）', 'bad');
     openSettings();
     return;
@@ -3304,6 +3594,26 @@ function bindEvents() {
   $('renameForm').addEventListener('submit', renameConversation);
   $('questionForm').addEventListener('submit', saveQuestion);
   $('ledgerForm').addEventListener('submit', saveLedgerRow);
+
+  $('pdfRangeForm').addEventListener('submit', (event) => {
+    if (!state.pdfRangeResolve) return;
+    const input = $('pdfRangeInput');
+    const range = parsePdfRange(input.value, state.pdfRangeTotal, state.pdfRangeMax);
+    if (!range) {
+      event.preventDefault();
+      input.setCustomValidity('请输入有效范围，例如 1-12，且单次不超过 ' + state.pdfRangeMax + ' 页');
+      input.reportValidity();
+      return;
+    }
+    input.setCustomValidity('');
+    settlePdfRange(range);
+  });
+  $('pdfRangeDialog').addEventListener('close', () => {
+    if (!state.pdfRangeResolve) return;
+    const resolve = state.pdfRangeResolve;
+    state.pdfRangeResolve = null;
+    resolve(null);
+  });
 
   $('newChatBtn').addEventListener('click', () => {
     if (!getCurrentSubject()) { openSubjectDialog(null); return; }
