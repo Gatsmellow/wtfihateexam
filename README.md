@@ -58,7 +58,7 @@ wtfihateexam 把一次学习收束成一个闭环：
 - 渲染标题、列表、引用、代码块、粗体、链接；所有模型输出先转义，不执行 HTML。
 - **公式渲染**：模型按常见 Markdown 习惯输出 `\(...\)`（行内）、`\[...\]` 或 `$$...$$`（独立成行）的 LaTeX，页面用本地 KaTeX 排版成正常公式；纯文本里的 `$...$` 不强行识别，避免把价格或普通符号误当公式。渲染失败时退回等宽原文，不吞内容。
 - AI 按约定输出 `【错题卡】{...}` 时，会显示成可收录的卡片；错因里的公式也会排版。
-- **图片 / 文档附件**：输入框左侧的回形针可一次选择多张图片（png / jpg / jpeg / webp）或文档（txt / md / csv / json / html / xml / pdf / doc / docx / ppt / pptx）；截图也可以直接 Ctrl+V 粘贴。图片以缩略图、文档以文件名显示在消息里，发送前可以逐个移除。图片按 OpenAI 多模态格式以 base64 data URL 发给 API；文档在浏览器内提取为纯文本，再随消息发给 API。DeepSeek 官方目前只有 `deepseek-flash` 支持读图，`deepseek-v4-pro` 只处理文字；当前模型不支持图片时会提示切换。官方能力说明：[DeepSeek 图像理解](https://api-docs.deepseek.com/zh-cn/guides/vision/)。
+- **图片 / 文档附件**：输入框左侧的回形针可一次选择多张图片（png / jpg / jpeg / webp）或文档（txt / md / csv / json / html / xml / pdf / doc / docx / ppt / pptx）；截图也可以直接 Ctrl+V 粘贴。图片以缩略图、文档以文件名显示在消息里，发送前可以逐个移除。图片按 OpenAI 多模态格式以 base64 data URL 发给 API；文档在浏览器内提取文字，手写/扫描 PDF 则在本机渲染成页面图后随消息发给 API。DeepSeek 官方目前只有 `deepseek-flash` 支持读图，`deepseek-v4-pro` 只处理文字；当前模型不支持图片时会提示切换。官方能力说明：[DeepSeek 图像理解](https://api-docs.deepseek.com/zh-cn/guides/vision/)。
 - **手写 / 扫描 PDF**：先尝试 PDF 内嵌文字层；没有文字层时（数位板手写、拍照扫描）自动用 PDF.js 在本机逐页渲染成图片，按多模态 `image_url` 发给 `deepseek-flash`，不再把空白文字层当成答案。已有文字层的 PDF 如果 OCR 层不可靠，可以在待发送附件上点 **“按图片识别”** 手动切到页面图模式。单条消息最多渲染 **12 页**；超长 PDF 会弹出页码范围对话框，默认 `1-12`，剩余页请分次上传。默认 170 DPI，页面图只留在当前页面内存，刷新即消失。
 - **文档提取边界**：`.docx` 用本地 mammoth；`.pptx` 用原生 ZIP 解压 + XML 读取；旧版 `.doc` / `.ppt` 是 OLE 二进制，浏览器只能尽力提取文字，表格、图片和版式可能缺失，页面会明确标注，建议优先另存为 `.docx` / `.pptx` / PDF。PDF 页面图不做 OCR，直接交给视觉模型；扫描件需要 `deepseek-flash`。
 - 附件在内存里处理，不经过任何转换服务器；页面上限为单文件 8 MB（PDF 30 MB）、一次 8 个附件、PDF 页面图合计最多 12 页。
