@@ -64,7 +64,7 @@ wtfihateexam 把一次学习收束成一个闭环：
 
 ![图片和文档附件](docs/attachment.png)
 
-![PDF、PPTX、DOCX 文档附件](docs/documents.png)
+![PDF、PPTX、DOCX、旧版 DOC 文档附件](docs/documents.png)
 
 ![公式渲染](docs/math.png)
 
